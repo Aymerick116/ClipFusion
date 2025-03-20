@@ -7,3 +7,8 @@ node_modules/
 
 # Environment Variables
 .env
+
+
+# Ignore uploaded videos and extracted audio
+backend/uploads/
+backend/audio/
