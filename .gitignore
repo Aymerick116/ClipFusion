@@ -7,4 +7,8 @@ node_modules/
 
 # Environment Variables
 .env
-__pycache__/
+
+
+# Ignore uploaded videos and extracted audio
+backend/uploads/
+backend/audio/
