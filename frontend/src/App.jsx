@@ -1,5 +1,6 @@
 import Upload from "./components/Upload";
 import VideoList from "./components/VideoList";
+import ClipGenerator from "./components/ClipGenerator";
 
 function App() {
   return (
@@ -76,6 +77,11 @@ function App() {
         </h2>
         <VideoList />
       </div>
+
+      <div className="bg-gray-900 shadow-lg rounded-lg p-4 w-full max-w-3xl mx-auto mt-6">
+        <ClipGenerator/>
+      </div>
+
     </div>
   );
 }

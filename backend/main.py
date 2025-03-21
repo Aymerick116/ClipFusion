@@ -9,6 +9,11 @@ from services.video_processing import extract_audio
 from services.transcription import transcribe_audio
 from services.database import SessionLocal, engine, Transcription, init_db
 
+from services.clips_generator import generate_clip
+
+
+from typing import List
+
 app = FastAPI()
 
 UPLOAD_FOLDER = "uploads"
@@ -122,6 +127,41 @@ def delete_transcript(filename: str = Query(...), db: Session = Depends(get_db))
     db.delete(record)
     db.commit()
     return {"message": f"Transcript for {filename} deleted."}
+
+
+@app.post("/generate-clips/")
+def generate_clips(
+    filename: str = Query(..., description="Filename of the uploaded video"),
+    timestamps: List[float] = Query(..., description="List of timestamps: start1, end1, start2, end2, ...")
+):
+    print(f"🎬 Generating clips for {filename}")
+    
+    if len(timestamps) % 2 != 0:
+        raise HTTPException(status_code=400, detail="Timestamps must be in pairs of start and end times.")
+
+    clips = []
+    for i in range(0, len(timestamps), 2):
+        start = timestamps[i]
+        end = timestamps[i + 1]
+        try:
+            clip_path = generate_clip(filename, start, end, clip_index=i // 2)
+            clips.append({
+                "clip_index": i // 2,
+                "start": start,
+                "end": end,
+                "clip_url": f"/{clip_path}"  # This will resolve if /clips is served
+            })
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    return {"filename": filename, "clips": clips}
+
+
+
+
+
+
+
 
 
 if __name__ == "__main__":

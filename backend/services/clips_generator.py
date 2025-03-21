@@ -35,15 +35,26 @@ def generate_clip(video_filename: str, start: float, end: float, clip_index: int
     output_path = os.path.join(CLIP_FOLDER, output_filename)
 
     # FFmpeg command
+    # command = [
+    #     "ffmpeg",
+    #     "-y",
+    #     "-i", input_path,
+    #     "-ss", str(start),
+    #     "-t", str(end - start),
+    #     "-c", "copy",
+    #     output_path
+    # ]
     command = [
-        "ffmpeg",
-        "-y",
-        "-i", input_path,
-        "-ss", str(start),
-        "-t", str(end - start),
-        "-c", "copy",
-        output_path
-    ]
+    "ffmpeg",
+    "-y",
+    "-i", input_path,
+    "-ss", str(start),
+    "-t", str(end - start),
+    "-c:v", "libx264",
+    "-c:a", "aac",
+    "-strict", "experimental",  # optional for AAC
+    output_path
+]
 
     try:
         subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
