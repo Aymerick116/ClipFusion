@@ -26,7 +26,7 @@ def transcribe_audio(audio_filename: str) -> dict:
         files = {"file": audio_file}
         data = {
             "language": "english",
-            "response_format": "json"
+            "response_format": "verbose_json"
         }
 
         response = requests.post(API_URL, headers=headers, files=files, data=data)
@@ -37,7 +37,7 @@ def transcribe_audio(audio_filename: str) -> dict:
 
     return response.json()
 
-# # ✅ Standalone Test
+# ✅ Standalone Test
 # if __name__ == "__main__":
 #     test_audio = "test3.mp3"
 #     try:
