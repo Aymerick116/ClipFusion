@@ -12,3 +12,4 @@ node_modules/
 # Ignore uploaded videos and extracted audio
 backend/uploads/
 backend/audio/
+backend/clips/
