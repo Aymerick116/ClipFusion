@@ -14,6 +14,12 @@ from services.clips_generator import generate_clip
 
 from typing import List
 
+
+#testing ai clip gen
+from services.ai_clip_selector import analyze_segments_with_textblob
+from fastapi import Body
+import json  
+
 app = FastAPI()
 
 UPLOAD_FOLDER = "uploads"
@@ -42,7 +48,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve uploads as static files
+# Serve static files
+app.mount("/clips", StaticFiles(directory="clips"), name="clips")
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 
@@ -73,6 +80,25 @@ def list_videos():
     return {"videos": videos}
 
 
+# @app.post("/transcribe/")
+# async def transcribe_video(
+#     filename: str = Query(..., description="Filename of the uploaded video"),
+#     db: Session = Depends(get_db)
+# ):
+#     print(f"📝 Transcribing video: {filename}")
+#     video_path = os.path.join(UPLOAD_FOLDER, filename)
+
+#     if not os.path.exists(video_path):
+#         raise HTTPException(status_code=404, detail=f"❌ Video not found: {filename}")
+
+#     audio_path = extract_audio(filename)
+#     transcript = transcribe_audio(os.path.basename(audio_path))
+
+#     db_transcription = Transcription(filename=filename, transcript=transcript["text"])
+#     db.add(db_transcription)
+#     db.commit()
+
+#     return {"filename": filename, "transcript": transcript}
 @app.post("/transcribe/")
 async def transcribe_video(
     filename: str = Query(..., description="Filename of the uploaded video"),
@@ -85,9 +111,14 @@ async def transcribe_video(
         raise HTTPException(status_code=404, detail=f"❌ Video not found: {filename}")
 
     audio_path = extract_audio(filename)
-    transcript = transcribe_audio(os.path.basename(audio_path))
+    transcript = transcribe_audio(os.path.basename(audio_path))  # Dict from LemonFox
 
-    db_transcription = Transcription(filename=filename, transcript=transcript["text"])
+    # ✅ Save entire transcript object as JSON string
+    db_transcription = Transcription(
+        filename=filename,
+        transcript=json.dumps(transcript)  # <-- this is the key change
+    )
+
     db.add(db_transcription)
     db.commit()
 
@@ -149,13 +180,61 @@ def generate_clips(
                 "clip_index": i // 2,
                 "start": start,
                 "end": end,
-                "clip_url": f"/{clip_path}"  # This will resolve if /clips is served
+                "clip_url": f"{clip_path}"  # This will resolve if /clips is served
             })
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
     return {"filename": filename, "clips": clips}
 
+
+
+@app.post("/generate-ai-clips/")
+def generate_ai_clips(
+    filename: str = Body(..., embed=True),
+    db: Session = Depends(get_db)
+):
+    print(f"🤖 Generating AI clips for: {filename}")
+
+    # 1. Fetch transcription from DB
+    record = db.query(Transcription).filter(Transcription.filename == filename).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+
+    # 2. Load JSON from transcript field
+    try:
+        transcript_data = json.loads(record.transcript)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="Transcript is not valid JSON")
+
+    segments = transcript_data.get("segments", [])
+    if not segments:
+        raise HTTPException(status_code=400, detail="No segments found in transcript.")
+
+    # 3. Analyze top emotional segments using TextBlob
+    top_segments = analyze_segments_with_textblob(segments, top_n=3)
+
+    # 4. Generate clips and build response
+    clips = []
+    for i, seg in enumerate(top_segments):
+        start = seg["start"]
+        end = seg["end"]
+        text = seg["text"]
+
+        try:
+            clip_url = generate_clip(filename, start, end, clip_index=i)
+            clips.append({
+                "clip_index": i,
+                "start": start,
+                "end": end,
+                "text": text,
+                "clip_url": clip_url
+            })
+        except Exception as e:
+            print(f"❌ Failed to generate clip {i}: {e}")
+            continue
+
+    return {"filename": filename, "clips": clips}
 
 
 
