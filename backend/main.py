@@ -16,7 +16,7 @@ from typing import List
 
 
 #testing ai clip gen
-from services.ai_clip_selector import analyze_segments_with_textblob
+from services.ai_clip_selector import run_pipeline_and_return_highlights
 from fastapi import Body
 import json  
 
@@ -80,25 +80,7 @@ def list_videos():
     return {"videos": videos}
 
 
-# @app.post("/transcribe/")
-# async def transcribe_video(
-#     filename: str = Query(..., description="Filename of the uploaded video"),
-#     db: Session = Depends(get_db)
-# ):
-#     print(f"📝 Transcribing video: {filename}")
-#     video_path = os.path.join(UPLOAD_FOLDER, filename)
 
-#     if not os.path.exists(video_path):
-#         raise HTTPException(status_code=404, detail=f"❌ Video not found: {filename}")
-
-#     audio_path = extract_audio(filename)
-#     transcript = transcribe_audio(os.path.basename(audio_path))
-
-#     db_transcription = Transcription(filename=filename, transcript=transcript["text"])
-#     db.add(db_transcription)
-#     db.commit()
-
-#     return {"filename": filename, "transcript": transcript}
 @app.post("/transcribe/")
 async def transcribe_video(
     filename: str = Query(..., description="Filename of the uploaded video"),
@@ -187,8 +169,6 @@ def generate_clips(
 
     return {"filename": filename, "clips": clips}
 
-
-
 @app.post("/generate-ai-clips/")
 def generate_ai_clips(
     filename: str = Body(..., embed=True),
@@ -211,15 +191,18 @@ def generate_ai_clips(
     if not segments:
         raise HTTPException(status_code=400, detail="No segments found in transcript.")
 
-    # 3. Analyze top emotional segments using TextBlob
-    top_segments = analyze_segments_with_textblob(segments, top_n=3)
+    # 3. Use LLM to get top emotional/interesting highlights
+    try:
+        top_highlights = run_pipeline_and_return_highlights(segments, top_n=3)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"LLM analysis failed: {e}")
 
     # 4. Generate clips and build response
     clips = []
-    for i, seg in enumerate(top_segments):
-        start = seg["start"]
-        end = seg["end"]
-        text = seg["text"]
+    for i, highlight in enumerate(top_highlights):
+        start = highlight["start"]
+        end = highlight["end"]
+        text = highlight["quote"]
 
         try:
             clip_url = generate_clip(filename, start, end, clip_index=i)
@@ -235,8 +218,6 @@ def generate_ai_clips(
             continue
 
     return {"filename": filename, "clips": clips}
-
-
 
 
 

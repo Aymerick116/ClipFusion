@@ -186,6 +186,13 @@ export default function ClipGenerator() {
                 <p className="text-xs text-gray-500">
                   Time: {clip.start}s – {clip.end}s
                 </p>
+                <a
+  href={`http://localhost:8000${clip.clip_url}`}
+  download
+  className="inline-block mt-1 text-sm text-indigo-600 hover:underline"
+>
+  ⬇️ Download AI Clip
+</a>
               </div>
             ))}
           </div>
