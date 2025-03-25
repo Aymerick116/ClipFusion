@@ -1,11 +1,15 @@
+
+
 import { useState } from "react";
 import axios from "axios";
+import { FaUpload, FaMagic, FaGoogleDrive, FaLink } from "react-icons/fa";
 
-const Upload = () => {
+const Upload = ({ refreshVideos }) => {
   const [file, setFile] = useState(null);
+  const [videoLink, setVideoLink] = useState("");
   const [message, setMessage] = useState("");
+  const [loading, setLoading] = useState(false);
 
-  // Allowed video MIME types
   const allowedTypes = ["video/mp4", "video/mov", "video/avi", "video/mkv"];
 
   const handleFileChange = (event) => {
@@ -13,22 +17,20 @@ const Upload = () => {
 
     if (selectedFile) {
       if (!allowedTypes.includes(selectedFile.type)) {
-        setMessage("❌ Invalid file type. Please upload a video (MP4, MOV, AVI, MKV).");
+        setMessage("❌ Invalid file type. Please upload a valid video.");
         setFile(null);
         return;
       }
-      
-      setMessage(""); // Clear any previous error messages
+
+      setMessage("");
       setFile(selectedFile);
     }
   };
 
   const handleUpload = async () => {
-    if (!file) {
-      setMessage("❌ Please select a valid video file.");
-      return;
-    }
+    if (!file) return null;
 
+    setLoading(true);
     const formData = new FormData();
     formData.append("file", file);
 
@@ -38,54 +40,88 @@ const Upload = () => {
       });
 
       setMessage(`✅ Upload Successful: ${response.data.filename}`);
+      refreshVideos();
+      return response.data.filename;
     } catch (error) {
       console.error("Upload failed:", error);
       setMessage("❌ Upload failed. Please try again.");
+      return null;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const generateAiClips = async () => {
+    if (!file && !videoLink) {
+      setMessage("❌ Please upload a file or enter a video link.");
+      return;
+    }
+
+    setLoading(true);
+
+    let filename = file ? await handleUpload() : videoLink;
+
+    if (!filename) {
+      setLoading(false);
+      return;
+    }
+
+    try {
+      await axios.post("http://127.0.0.1:8000/generate-ai-clips/", { filename });
+      setMessage("✅ AI Clips Generated!");
+      refreshVideos();
+    } catch (error) {
+      console.error("AI Clip Generation Failed:", error);
+      setMessage("❌ AI Clip generation failed. Try again.");
+    } finally {
+      setLoading(false);
     }
   };
 
   return (
-    <div className="bg-white shadow-lg rounded-lg p-4 w-80 flex flex-col items-center justify-items-center">
-      <h2 className="text-sm font-semibold text-gray-700 mb-3 text-center">Upload Video</h2>
-      
-      {/* File Upload Input - Centered */}
-      <div className="border border-gray-300 rounded-md p-4 w-full flex flex-col items-center justify-items-center text-center cursor-pointer hover:border-blue-500 transition">
-        <input
-          type="file"
-          accept="video/*"
-          className="hidden"
-          id="fileInput"
-          onChange={handleFileChange}
-        />
-        <label htmlFor="fileInput" className="block text-gray-600 cursor-pointer text-sm">
-          {file ? (
-            <span className="text-green-600 font-medium">{file.name}</span>
-          ) : (
-            <span className="text-gray-500">Click to upload a video</span>
-          )}
-        </label>
+    <div className="bg-gray-900 shadow-lg rounded-lg p-6 w-full max-w-xl text-white">
+      {/* Video Link Input */}
+      <div className="mb-4">
+        <div className="flex items-center gap-2 bg-gray-800 p-3 rounded-md border border-gray-700">
+          <FaLink />
+          <input
+            type="text"
+            placeholder="Enter video link"
+            value={videoLink}
+            onChange={(e) => setVideoLink(e.target.value)}
+            className="w-full bg-transparent text-white focus:outline-none"
+          />
+        </div>
       </div>
 
-      {/* Upload Button */}
+      {/* Upload & Google Drive Buttons */}
+      <div className="flex justify-between mb-4">
+        <label
+          htmlFor="fileInput"
+          className="cursor-pointer flex items-center gap-2 bg-gray-800 px-4 py-2 rounded-md hover:bg-gray-700 transition"
+        >
+          <FaUpload /> Upload
+          <input type="file" id="fileInput" className="hidden" onChange={handleFileChange} />
+        </label>
+
+        <button className="flex items-center gap-2 bg-gray-800 px-4 py-2 rounded-md hover:bg-gray-700 transition">
+          <FaGoogleDrive /> Google Drive
+        </button>
+      </div>
+
+      {/* Generate AI Clips Button */}
       <button
-        onClick={handleUpload}
-        disabled={!file}
-        className={`w-full mt-3 py-1.5 rounded-md text-sm font-semibold transition ${
-          file
-            ? "bg-blue-500 text-white hover:bg-blue-600"
-            : "bg-gray-300 text-gray-500 cursor-not-allowed"
-        }`}
+        onClick={generateAiClips}
+        className="w-full py-3 text-black bg-white rounded-md font-semibold text-lg hover:bg-gray-300 transition flex items-center justify-center gap-2"
+        disabled={loading}
       >
-        Upload
+        {loading ? "Processing..." : <><FaMagic /> Get AI Clips</>}
       </button>
+
 
       {/* Status Message */}
       {message && (
-        <p
-          className={`mt-2 text-xs text-center ${
-            message.includes("❌") ? "text-red-500" : "text-green-600"
-          }`}
-        >
+        <p className={`mt-4 text-sm text-center ${message.includes("❌") ? "text-red-500" : "text-green-500"}`}>
           {message}
         </p>
       )}

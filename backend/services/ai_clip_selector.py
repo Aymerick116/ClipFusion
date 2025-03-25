@@ -110,3 +110,5 @@ def run_pipeline_and_return_highlights(segments, top_n=3, min_duration=60.0):
 
     highlights = process_llm_highlights(llm_output, segments, min_duration=min_duration)
     return highlights
+
+

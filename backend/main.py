@@ -19,10 +19,13 @@ from typing import List
 from services.ai_clip_selector import run_pipeline_and_return_highlights
 from fastapi import Body
 import json  
+import glob
 
 app = FastAPI()
 
 UPLOAD_FOLDER = "uploads"
+# Directory where clips are saved
+CLIP_FOLDER = "/Users/aymerickosse/ClipFusion/backend/clips"
 
 # Dependency to get DB session
 def get_db():
@@ -49,8 +52,11 @@ app.add_middleware(
 )
 
 # Serve static files
-app.mount("/clips", StaticFiles(directory="clips"), name="clips")
+# app.mount("/clips", StaticFiles(directory="clips"), name="clips")
+app.mount("/clips", StaticFiles(directory=CLIP_FOLDER), name="clips")
+
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+
 
 
 @app.get("/")
@@ -219,7 +225,49 @@ def generate_ai_clips(
 
     return {"filename": filename, "clips": clips}
 
+import glob
 
+@app.get("/clips/{filename}")
+def get_clips(filename: str):
+    print("📂 Debugging `/clips/{filename}` request...")
+
+    # Log the raw filename received
+    print(f"🔍 Raw filename received: {repr(filename)}")  # Using repr() to catch extra characters
+
+    # Ensure the clips folder exists
+    if not os.path.exists(CLIP_FOLDER):
+        print(f"⚠️ Clips folder does NOT exist: {CLIP_FOLDER}")
+        raise HTTPException(status_code=500, detail="Clips folder does not exist on the server.")
+
+    # Clean potential encoding issues (remove unwanted quotes)
+    filename = filename.strip('"')  # Remove leading/trailing quotes if present
+    print(f"📝 Cleaned filename: {repr(filename)}")
+
+    # Extract base name (remove extension) to match naming convention
+    base_filename = os.path.splitext(filename)[0]  # Example: test3.mp4 -> test3
+    print(f"🔍 Searching for clips matching base filename: {repr(base_filename)}")
+
+    # Get all matching clips from the folder
+    clip_files = glob.glob(os.path.join(CLIP_FOLDER, f"{base_filename}_*"))
+    print(f"📂 Matched clip files: {clip_files}")
+
+    # Check if we found any clips
+    if not clip_files:
+        print(f"❌ No clips found for: {filename}")
+        raise HTTPException(status_code=404, detail="No clips found for this video.")
+
+    # Build response with full URLs
+    clips = [
+        {
+            "clip_index": i,
+            "clip_filename": os.path.basename(clip_file),
+            "clip_url": f"http://127.0.0.1:8000/clips/{os.path.basename(clip_file)}"
+        }
+        for i, clip_file in enumerate(sorted(clip_files))
+    ]
+
+    print(f"✅ Successfully found clips: {clips}")
+    return {"filename": filename, "clips": clips}
 
 
 
