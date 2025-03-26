@@ -4,16 +4,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 import os
-
 from services.video_processing import extract_audio
 from services.transcription import transcribe_audio
-from services.database import SessionLocal, engine, Transcription, init_db
-
+from services.database import SessionLocal, engine, Transcription, init_db, Video, Clip
 from services.clips_generator import generate_clip
-
-
 from typing import List
-
 
 #testing ai clip gen
 from services.ai_clip_selector import run_pipeline_and_return_highlights
@@ -21,11 +16,24 @@ from fastapi import Body
 import json  
 import glob
 
+import boto3
+from dotenv import load_dotenv
+from uuid import uuid4
+import io
+from botocore.exceptions import NoCredentialsError
+
+
+load_dotenv()  # Load environment variables
 app = FastAPI()
 
 UPLOAD_FOLDER = "uploads"
 # Directory where clips are saved
-CLIP_FOLDER = "/Users/aymerickosse/ClipFusion/backend/clips"
+# CLIP_FOLDER = "/Users/aymerickosse/ClipFusion/backend/clips"
+# Define temporary storage for downloaded videos
+TEMP_DOWNLOAD_FOLDER = "temp"
+CLIP_FOLDER = "clips"
+os.makedirs(TEMP_DOWNLOAD_FOLDER, exist_ok=True)
+os.makedirs(CLIP_FOLDER, exist_ok=True)
 
 # Dependency to get DB session
 def get_db():
@@ -53,9 +61,24 @@ app.add_middleware(
 
 # Serve static files
 # app.mount("/clips", StaticFiles(directory="clips"), name="clips")
-app.mount("/clips", StaticFiles(directory=CLIP_FOLDER), name="clips")
+# app.mount("/clips", StaticFiles(directory=CLIP_FOLDER), name="clips")
 
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+# app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+
+# AWS S3 Configuration
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+AWS_REGION = os.getenv("AWS_REGION")
+AWS_S3_BUCKET = os.getenv("AWS_S3_BUCKET")
+
+# Initialize S3 Client
+s3_client = boto3.client(
+    "s3",
+    aws_access_key_id=AWS_ACCESS_KEY_ID,
+    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+    region_name=AWS_REGION,
+)
+
 
 
 
@@ -65,25 +88,61 @@ def read_root():
     return {"message": "Welcome to ClipFusion API"}
 
 
+# @app.post("/upload/")
+# async def upload_video(file: UploadFile = File(...)):
+#     print(f"📤 Uploading video: {file.filename}")
+#     os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+#     file_path = os.path.join(UPLOAD_FOLDER, file.filename)
+
+#     with open(file_path, "wb") as buffer:
+#         buffer.write(await file.read())
+
+#     return {"filename": file.filename, "message": "Upload Successful"}
 @app.post("/upload/")
-async def upload_video(file: UploadFile = File(...)):
+async def upload_video(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """
+    Uploads a video to AWS S3 and saves the metadata in the database.
+    """
     print(f"📤 Uploading video: {file.filename}")
-    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-    file_path = os.path.join(UPLOAD_FOLDER, file.filename)
 
-    with open(file_path, "wb") as buffer:
-        buffer.write(await file.read())
+    # Generate a unique filename to prevent conflicts
+    unique_filename = f"{uuid4()}_{file.filename}"
 
-    return {"filename": file.filename, "message": "Upload Successful"}
+    # Upload file to S3
+    s3_client.upload_fileobj(file.file, AWS_S3_BUCKET, unique_filename)
 
+    # Get the public URL of the uploaded file
+    s3_url = f"https://{AWS_S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{unique_filename}"
+
+    # ✅ Store video metadata in the database
+    db_video = Video(filename=file.filename, s3_url=s3_url)
+    db.add(db_video)
+    db.commit()
+
+    return {"filename": file.filename, "s3_url": s3_url, "message": "Upload Successful"}
+
+
+# @app.get("/videos/")
+# def list_videos():
+#     print("📂 GET /videos/ called")
+#     os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+#     video_extensions = (".mp4", ".mov", ".avi", ".mkv")
+#     videos = [f for f in os.listdir(UPLOAD_FOLDER) if f.endswith(video_extensions)]
+#     return {"videos": videos}
 
 @app.get("/videos/")
-def list_videos():
-    print("📂 GET /videos/ called")
-    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-    video_extensions = (".mp4", ".mov", ".avi", ".mkv")
-    videos = [f for f in os.listdir(UPLOAD_FOLDER) if f.endswith(video_extensions)]
-    return {"videos": videos}
+def list_videos(db: Session = Depends(get_db)):
+    """
+    Lists all uploaded videos from the database with their S3 URLs.
+    """
+    print("📂 Fetching all videos from DB")
+
+    videos = db.query(Video).all()
+    return [
+        {"filename": video.filename, "s3_url": video.s3_url}
+        for video in videos
+    ]
+
 
 
 
@@ -148,32 +207,37 @@ def delete_transcript(filename: str = Query(...), db: Session = Depends(get_db))
     return {"message": f"Transcript for {filename} deleted."}
 
 
-@app.post("/generate-clips/")
-def generate_clips(
-    filename: str = Query(..., description="Filename of the uploaded video"),
-    timestamps: List[float] = Query(..., description="List of timestamps: start1, end1, start2, end2, ...")
-):
-    print(f"🎬 Generating clips for {filename}")
+
+def download_from_s3(s3_key: str) -> str:
+    """Downloads a video from S3 and saves it locally."""
+    local_path = os.path.join(TEMP_DOWNLOAD_FOLDER, os.path.basename(s3_key))
     
-    if len(timestamps) % 2 != 0:
-        raise HTTPException(status_code=400, detail="Timestamps must be in pairs of start and end times.")
+    print(f"🔍 Attempting to download: s3://{AWS_S3_BUCKET}/{s3_key} → {local_path}")
 
-    clips = []
-    for i in range(0, len(timestamps), 2):
-        start = timestamps[i]
-        end = timestamps[i + 1]
-        try:
-            clip_path = generate_clip(filename, start, end, clip_index=i // 2)
-            clips.append({
-                "clip_index": i // 2,
-                "start": start,
-                "end": end,
-                "clip_url": f"{clip_path}"  # This will resolve if /clips is served
-            })
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+    try:
+        s3_client.download_file(AWS_S3_BUCKET, s3_key, local_path)
+        print(f"✅ Downloaded from S3: {s3_key} → {local_path}")
+        return local_path
+    except NoCredentialsError:
+        print("❌ AWS credentials not available.")
+        return None
+    except Exception as e:
+        print(f"❌ Failed to download from S3: {str(e)}")
+        return None
+    
+def upload_to_s3(file_path: str, s3_key: str) -> str:
+    """Uploads a generated clip to S3 and returns the public URL."""
+    try:
+        s3_client.upload_file(file_path, AWS_S3_BUCKET, s3_key, ExtraArgs={"ContentType": "video/mp4"})
+        print(f"✅ Uploaded to S3: s3://{AWS_S3_BUCKET}/{s3_key}")
+        return f"https://{AWS_S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{s3_key}"
+    except NoCredentialsError:
+        print("❌ AWS credentials not available.")
+        return None
+    except Exception as e:
+        print(f"❌ Upload failed: {str(e)}")
+        return None
 
-    return {"filename": filename, "clips": clips}
 
 @app.post("/generate-ai-clips/")
 def generate_ai_clips(
@@ -182,12 +246,29 @@ def generate_ai_clips(
 ):
     print(f"🤖 Generating AI clips for: {filename}")
 
-    # 1. Fetch transcription from DB
+    # 1️⃣ Fetch video metadata from DB (get actual S3 URL)
+    video_record = db.query(Video).filter(Video.filename == filename).first()
+    if not video_record:
+        raise HTTPException(status_code=404, detail=f"Video '{filename}' not found in database.")
+
+    s3_url = video_record.s3_url
+    print(f"🎥 Found S3 URL: {s3_url}")
+
+    # 2️⃣ Extract S3 Key from URL
+    s3_video_key = s3_url.split(f"https://{AWS_S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/")[-1]
+    print(f"🔑 Extracted S3 Key: {s3_video_key}")
+
+    # 3️⃣ Download video using the correct key
+    video_path = download_from_s3(s3_video_key)
+    if not video_path:
+        raise HTTPException(status_code=500, detail="Failed to download video from S3.")
+
+    # 4️⃣ Fetch transcript from DB
     record = db.query(Transcription).filter(Transcription.filename == filename).first()
     if not record:
         raise HTTPException(status_code=404, detail="Transcript not found")
 
-    # 2. Load JSON from transcript field
+    # 5️⃣ Load JSON from transcript field
     try:
         transcript_data = json.loads(record.transcript)
     except json.JSONDecodeError:
@@ -197,13 +278,13 @@ def generate_ai_clips(
     if not segments:
         raise HTTPException(status_code=400, detail="No segments found in transcript.")
 
-    # 3. Use LLM to get top emotional/interesting highlights
+    # 6️⃣ Use AI to get top emotional/interesting highlights
     try:
         top_highlights = run_pipeline_and_return_highlights(segments, top_n=3)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"LLM analysis failed: {e}")
 
-    # 4. Generate clips and build response
+    # 7️⃣ Generate clips, upload to S3, and save to DB
     clips = []
     for i, highlight in enumerate(top_highlights):
         start = highlight["start"]
@@ -211,7 +292,31 @@ def generate_ai_clips(
         text = highlight["quote"]
 
         try:
-            clip_url = generate_clip(filename, start, end, clip_index=i)
+            print(f"🎬 Generating Clip {i} for {filename} (Start: {start}, End: {end})")
+
+            # ✅ Generate clip
+            clip_path = generate_clip(video_path, start, end, clip_index=i)
+
+            # ✅ Upload clip to S3
+            clip_s3_key = f"clips/{os.path.basename(clip_path)}"
+            clip_url = upload_to_s3(clip_path, clip_s3_key)
+
+            if not clip_url:
+                print(f"❌ ERROR: Clip {i} failed to upload.")
+                continue  # Skip to next clip
+
+            # ✅ Store clip metadata in DB
+            db_clip = Clip(
+                id=str(uuid4()),
+                filename=filename,
+                start_time=start,
+                end_time=end,
+                clip_url=clip_url
+            )
+            db.add(db_clip)
+            db.commit()
+            print(f"✅ Clip {i} metadata saved in DB")
+
             clips.append({
                 "clip_index": i,
                 "start": start,
@@ -219,61 +324,64 @@ def generate_ai_clips(
                 "text": text,
                 "clip_url": clip_url
             })
+
         except Exception as e:
-            print(f"❌ Failed to generate clip {i}: {e}")
+            print(f"❌ ERROR: Failed to process clip {i}: {e}")
             continue
 
+    # 8️⃣ Clean up local files after processing
+    os.remove(video_path)
+    print(f"🗑️ Deleted local original video: {video_path}")
+
+    for clip in clips:
+        clip_path = os.path.join(CLIP_FOLDER, os.path.basename(clip["clip_url"]))
+        os.remove(clip_path)
+        print(f"🗑️ Deleted local clip: {clip_path}")
+
+    print(f"✅ AI Clip Generation Completed for {filename}")
     return {"filename": filename, "clips": clips}
 
-import glob
 
-@app.get("/clips/{filename}")
-def get_clips(filename: str):
-    print("📂 Debugging `/clips/{filename}` request...")
+@app.get("/get-clips/")
+def get_clips(
+    filename: str = Query(..., description="Filename of the selected video"),
+    db: Session = Depends(get_db)
+):
+    """
+    Fetches all clips generated for a specific video.
+    """
+    print(f"🔍 Fetching clips for: {filename}")
 
-    # Log the raw filename received
-    print(f"🔍 Raw filename received: {repr(filename)}")  # Using repr() to catch extra characters
+    # Query the database for clips associated with the given filename
+    clips = db.query(Clip).filter(Clip.filename == filename).all()
 
-    # Ensure the clips folder exists
-    if not os.path.exists(CLIP_FOLDER):
-        print(f"⚠️ Clips folder does NOT exist: {CLIP_FOLDER}")
-        raise HTTPException(status_code=500, detail="Clips folder does not exist on the server.")
-
-    # Clean potential encoding issues (remove unwanted quotes)
-    filename = filename.strip('"')  # Remove leading/trailing quotes if present
-    print(f"📝 Cleaned filename: {repr(filename)}")
-
-    # Extract base name (remove extension) to match naming convention
-    base_filename = os.path.splitext(filename)[0]  # Example: test3.mp4 -> test3
-    print(f"🔍 Searching for clips matching base filename: {repr(base_filename)}")
-
-    # Get all matching clips from the folder
-    clip_files = glob.glob(os.path.join(CLIP_FOLDER, f"{base_filename}_*"))
-    print(f"📂 Matched clip files: {clip_files}")
-
-    # Check if we found any clips
-    if not clip_files:
-        print(f"❌ No clips found for: {filename}")
+    if not clips:
         raise HTTPException(status_code=404, detail="No clips found for this video.")
 
-    # Build response with full URLs
-    clips = [
-        {
-            "clip_index": i,
-            "clip_filename": os.path.basename(clip_file),
-            "clip_url": f"http://127.0.0.1:8000/clips/{os.path.basename(clip_file)}"
-        }
-        for i, clip_file in enumerate(sorted(clip_files))
-    ]
+    # Format the response
+    return {
+        "filename": filename,
+        "clips": [
+            {
+                "clip_id": clip.id,
+                "start_time": clip.start_time,
+                "end_time": clip.end_time,
+                "clip_url": clip.clip_url
+            }
+            for clip in clips
+        ]
+    }
 
-    print(f"✅ Successfully found clips: {clips}")
-    return {"filename": filename, "clips": clips}
+
 
 
 
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)
+
+
+
 
 
 

@@ -1,24 +1,4 @@
-// import { BrowserRouter as Router, Route, Routes } from "react-router-dom";
-// import Sidebar from "./components/Sidebar";
-// import Dashboard from "./pages/Dashboard";
 
-// const App = () => {
-//   return (
-//     <Router>
-//       <div className="flex min-h-screen bg-black text-white">
-//         <Sidebar />
-//         <div className="flex-1 w-full">
-//           <Routes>
-//             <Route path="/dashboard" element={<Dashboard />} />
-        
-//           </Routes>
-//         </div>
-//       </div>
-//     </Router>
-//   );
-// };
-
-// export default App;
 
 import { BrowserRouter as Router, Route, Routes } from "react-router-dom";
 import Sidebar from "./components/Sidebar";
