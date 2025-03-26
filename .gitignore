@@ -13,3 +13,4 @@ node_modules/
 backend/uploads/
 backend/audio/
 backend/clips/
+backend/temp/
