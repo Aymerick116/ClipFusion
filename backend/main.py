@@ -89,28 +89,6 @@ def read_root():
     return {"message": "Welcome to ClipFusion API"}
 
 
-# @app.post("/upload/")
-# async def upload_video(file: UploadFile = File(...), db: Session = Depends(get_db)):
-#     """
-#     Uploads a video to AWS S3 and saves the metadata in the database.
-#     """
-#     print(f"📤 Uploading video: {file.filename}")
-
-#     # Generate a unique filename to prevent conflicts
-#     unique_filename = f"{uuid4()}_{file.filename}"
-
-#     # Upload file to S3
-#     s3_client.upload_fileobj(file.file, AWS_S3_BUCKET, unique_filename)
-
-#     # Get the public URL of the uploaded file
-#     s3_url = f"https://{AWS_S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{unique_filename}"
-
-#     # ✅ Store video metadata in the database
-#     db_video = Video(filename=file.filename, s3_url=s3_url)
-#     db.add(db_video)
-#     db.commit()
-
-#     return {"filename": file.filename, "s3_url": s3_url, "message": "Upload Successful"}
 
 @app.post("/upload/")
 async def upload_video(
@@ -122,6 +100,16 @@ async def upload_video(
     and immediately transcribes it.
     """
     print(f"📤 Uploading video: {file.filename}")
+
+    # Check if the video already exists in the DB
+    existing_video = db.query(Video).filter(Video.filename == file.filename).first()
+    if existing_video:
+        print(f"⚠️ Video '{file.filename}' already exists in DB. Skipping re-upload.")
+        return {
+            "filename": existing_video.filename, 
+            "s3_url": existing_video.s3_url, 
+            "message": "Video already uploaded."
+        }
 
     # Generate a unique filename to prevent conflicts
     unique_filename = f"{uuid4()}_{file.filename}"
@@ -212,30 +200,7 @@ def list_videos(db: Session = Depends(get_db)):
 
 
 
-# @app.post("/transcribe/")
-# async def transcribe_video(
-#     filename: str = Query(..., description="Filename of the uploaded video"),
-#     db: Session = Depends(get_db)
-# ):
-#     print(f"📝 Transcribing video: {filename}")
-#     video_path = os.path.join(UPLOAD_FOLDER, filename)
 
-#     if not os.path.exists(video_path):
-#         raise HTTPException(status_code=404, detail=f"❌ Video not found: {filename}")
-
-#     audio_path = extract_audio(filename)
-#     transcript = transcribe_audio(os.path.basename(audio_path))  # Dict from LemonFox
-
-#     # ✅ Save entire transcript object as JSON string
-#     db_transcription = Transcription(
-#         filename=filename,
-#         transcript=json.dumps(transcript)  # <-- this is the key change
-#     )
-
-#     db.add(db_transcription)
-#     db.commit()
-
-#     return {"filename": filename, "transcript": transcript}
 
 
 @app.get("/transcript/")
