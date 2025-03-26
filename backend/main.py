@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Depends
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Depends, BackgroundTasks
 import uvicorn
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 from uuid import uuid4
 import io
 from botocore.exceptions import NoCredentialsError
+import requests
 
 
 load_dotenv()  # Load environment variables
@@ -88,22 +89,27 @@ def read_root():
     return {"message": "Welcome to ClipFusion API"}
 
 
-# @app.post("/upload/")
-# async def upload_video(file: UploadFile = File(...)):
-#     print(f"📤 Uploading video: {file.filename}")
-#     os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-#     file_path = os.path.join(UPLOAD_FOLDER, file.filename)
 
-#     with open(file_path, "wb") as buffer:
-#         buffer.write(await file.read())
-
-#     return {"filename": file.filename, "message": "Upload Successful"}
 @app.post("/upload/")
-async def upload_video(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_video(
+    file: UploadFile = File(...), 
+    db: Session = Depends(get_db)
+):
     """
-    Uploads a video to AWS S3 and saves the metadata in the database.
+    Uploads a video to AWS S3, saves metadata in the database,
+    and immediately transcribes it.
     """
     print(f"📤 Uploading video: {file.filename}")
+
+    # Check if the video already exists in the DB
+    existing_video = db.query(Video).filter(Video.filename == file.filename).first()
+    if existing_video:
+        print(f"⚠️ Video '{file.filename}' already exists in DB. Skipping re-upload.")
+        return {
+            "filename": existing_video.filename, 
+            "s3_url": existing_video.s3_url, 
+            "message": "Video already uploaded."
+        }
 
     # Generate a unique filename to prevent conflicts
     unique_filename = f"{uuid4()}_{file.filename}"
@@ -119,16 +125,64 @@ async def upload_video(file: UploadFile = File(...), db: Session = Depends(get_d
     db.add(db_video)
     db.commit()
 
-    return {"filename": file.filename, "s3_url": s3_url, "message": "Upload Successful"}
+    # 🔄 **Immediately transcribe and store in DB**
+    try:
+        transcript = transcribe_and_store(file.filename, db)
+    except HTTPException as e:
+        return {"filename": file.filename, "s3_url": s3_url, "message": f"Upload successful, but transcription failed: {e.detail}"}
+
+    return {
+        "filename": file.filename, 
+        "s3_url": s3_url, 
+        "transcript": transcript,
+        "message": "Upload and transcription successful."
+    }
+
+def transcribe_and_store(filename: str, db: Session):
+    """
+    Downloads the video from S3, extracts audio, transcribes it, and stores the transcript in the database.
+    Deletes extracted audio from S3 after transcription.
+    """
+    print(f"📝 Fetching video details from DB: {filename}")
+
+    # ✅ Fetch video metadata from the DB
+    video_record = db.query(Video).filter(Video.filename == filename).first()
+    if not video_record:
+        raise HTTPException(status_code=404, detail=f"❌ Video '{filename}' not found in database.")
+
+    s3_url = video_record.s3_url
+    print(f"🎥 Found S3 URL: {s3_url}")
+
+    # ✅ Extract audio and upload to S3
+    audio_s3_url = extract_audio(s3_url, filename)
+
+    # ✅ Transcribe using S3 audio URL
+    transcript = transcribe_audio(audio_s3_url)
+
+    if not transcript:
+        raise HTTPException(status_code=500, detail="❌ Transcription failed")
+
+    # ✅ Save transcript in the database
+    db_transcription = Transcription(
+        filename=filename,
+        transcript=json.dumps(transcript)  # Store as JSON
+    )
+    db.add(db_transcription)
+    db.commit()
+
+    print(f"✅ Transcription saved for {filename}")
+
+    # ✅ Delete extracted audio from S3 after transcription
+    audio_s3_key = audio_s3_url.split(f"https://{AWS_S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/")[-1]
+    try:
+        s3_client.delete_object(Bucket=AWS_S3_BUCKET, Key=audio_s3_key)
+        print(f"🗑️ Deleted audio from S3: {audio_s3_key}")
+    except Exception as e:
+        print(f"❌ Failed to delete audio from S3: {e}")
+
+    return transcript
 
 
-# @app.get("/videos/")
-# def list_videos():
-#     print("📂 GET /videos/ called")
-#     os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-#     video_extensions = (".mp4", ".mov", ".avi", ".mkv")
-#     videos = [f for f in os.listdir(UPLOAD_FOLDER) if f.endswith(video_extensions)]
-#     return {"videos": videos}
 
 @app.get("/videos/")
 def list_videos(db: Session = Depends(get_db)):
@@ -146,30 +200,7 @@ def list_videos(db: Session = Depends(get_db)):
 
 
 
-@app.post("/transcribe/")
-async def transcribe_video(
-    filename: str = Query(..., description="Filename of the uploaded video"),
-    db: Session = Depends(get_db)
-):
-    print(f"📝 Transcribing video: {filename}")
-    video_path = os.path.join(UPLOAD_FOLDER, filename)
 
-    if not os.path.exists(video_path):
-        raise HTTPException(status_code=404, detail=f"❌ Video not found: {filename}")
-
-    audio_path = extract_audio(filename)
-    transcript = transcribe_audio(os.path.basename(audio_path))  # Dict from LemonFox
-
-    # ✅ Save entire transcript object as JSON string
-    db_transcription = Transcription(
-        filename=filename,
-        transcript=json.dumps(transcript)  # <-- this is the key change
-    )
-
-    db.add(db_transcription)
-    db.commit()
-
-    return {"filename": filename, "transcript": transcript}
 
 
 @app.get("/transcript/")
@@ -254,21 +285,24 @@ def generate_ai_clips(
     s3_url = video_record.s3_url
     print(f"🎥 Found S3 URL: {s3_url}")
 
-    # 2️⃣ Extract S3 Key from URL
-    s3_video_key = s3_url.split(f"https://{AWS_S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/")[-1]
-    print(f"🔑 Extracted S3 Key: {s3_video_key}")
+    # 2️⃣ Download video from S3
+    local_video_path = os.path.join(TEMP_DOWNLOAD_FOLDER, filename)
+    try:
+        response = requests.get(s3_url, stream=True)
+        response.raise_for_status()
+        with open(local_video_path, "wb") as video_file:
+            for chunk in response.iter_content(chunk_size=8192):
+                video_file.write(chunk)
+        print(f"✅ Video downloaded: {local_video_path}")
+    except requests.RequestException as e:
+        raise HTTPException(status_code=500, detail=f"❌ Failed to download video from S3: {e}")
 
-    # 3️⃣ Download video using the correct key
-    video_path = download_from_s3(s3_video_key)
-    if not video_path:
-        raise HTTPException(status_code=500, detail="Failed to download video from S3.")
-
-    # 4️⃣ Fetch transcript from DB
+    # 3️⃣ Fetch transcript from DB
     record = db.query(Transcription).filter(Transcription.filename == filename).first()
     if not record:
         raise HTTPException(status_code=404, detail="Transcript not found")
 
-    # 5️⃣ Load JSON from transcript field
+    # 4️⃣ Load JSON from transcript field
     try:
         transcript_data = json.loads(record.transcript)
     except json.JSONDecodeError:
@@ -278,13 +312,13 @@ def generate_ai_clips(
     if not segments:
         raise HTTPException(status_code=400, detail="No segments found in transcript.")
 
-    # 6️⃣ Use AI to get top emotional/interesting highlights
+    # 5️⃣ Use AI to get top emotional/interesting highlights
     try:
         top_highlights = run_pipeline_and_return_highlights(segments, top_n=3)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"LLM analysis failed: {e}")
 
-    # 7️⃣ Generate clips, upload to S3, and save to DB
+    # 6️⃣ Generate clips, upload to S3, and save to DB
     clips = []
     for i, highlight in enumerate(top_highlights):
         start = highlight["start"]
@@ -295,7 +329,7 @@ def generate_ai_clips(
             print(f"🎬 Generating Clip {i} for {filename} (Start: {start}, End: {end})")
 
             # ✅ Generate clip
-            clip_path = generate_clip(video_path, start, end, clip_index=i)
+            clip_path = generate_clip(local_video_path, start, end, clip_index=i)
 
             # ✅ Upload clip to S3
             clip_s3_key = f"clips/{os.path.basename(clip_path)}"
@@ -325,18 +359,17 @@ def generate_ai_clips(
                 "clip_url": clip_url
             })
 
+            # ✅ Delete the local clip file after uploading
+            os.remove(clip_path)
+            print(f"🗑️ Deleted local clip: {clip_path}")
+
         except Exception as e:
             print(f"❌ ERROR: Failed to process clip {i}: {e}")
             continue
 
-    # 8️⃣ Clean up local files after processing
-    os.remove(video_path)
-    print(f"🗑️ Deleted local original video: {video_path}")
-
-    for clip in clips:
-        clip_path = os.path.join(CLIP_FOLDER, os.path.basename(clip["clip_url"]))
-        os.remove(clip_path)
-        print(f"🗑️ Deleted local clip: {clip_path}")
+    # 7️⃣ Clean up: Delete local video file after processing
+    os.remove(local_video_path)
+    print(f"🗑️ Deleted local original video: {local_video_path}")
 
     print(f"✅ AI Clip Generation Completed for {filename}")
     return {"filename": filename, "clips": clips}
