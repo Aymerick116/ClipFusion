@@ -60,11 +60,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve static files
-# app.mount("/clips", StaticFiles(directory="clips"), name="clips")
-# app.mount("/clips", StaticFiles(directory=CLIP_FOLDER), name="clips")
 
-# app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 # AWS S3 Configuration
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
@@ -196,6 +192,60 @@ def list_videos(db: Session = Depends(get_db)):
         {"filename": video.filename, "s3_url": video.s3_url}
         for video in videos
     ]
+
+@app.delete("/video/")
+def delete_video(
+    filename: str = Query(..., description="Filename of the video to delete"),
+    db: Session = Depends(get_db)
+):
+    print(f"🗑️ Deleting everything related to: {filename}")
+
+    # 🔍 Get the video record
+    video_record = db.query(Video).filter(Video.filename == filename).first()
+    if not video_record:
+        raise HTTPException(status_code=404, detail="Video not found in the database.")
+
+    # Extract the S3 key from the URL
+    try:
+        video_s3_key = video_record.s3_url.split(f"https://{AWS_S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/")[-1]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse video S3 key: {e}")
+
+    # 🗑️ Delete video from S3
+    try:
+        s3_client.delete_object(Bucket=AWS_S3_BUCKET, Key=video_s3_key)
+        print(f"✅ Deleted video from S3: {video_s3_key}")
+    except Exception as e:
+        print(f"❌ Failed to delete video from S3: {e}")
+
+    # 🗑️ Delete associated clips
+    clips = db.query(Clip).filter(Clip.filename == filename).all()
+    for clip in clips:
+        # Delete clip from S3
+        clip_s3_key = clip.clip_url.split(f"https://{AWS_S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/")[-1]
+        try:
+            s3_client.delete_object(Bucket=AWS_S3_BUCKET, Key=clip_s3_key)
+            print(f"✅ Deleted clip from S3: {clip_s3_key}")
+        except Exception as e:
+            print(f"❌ Failed to delete clip from S3: {e}")
+        
+        # Delete clip from DB
+        db.delete(clip)
+
+    # 🗑️ Delete transcription
+    transcription = db.query(Transcription).filter(Transcription.filename == filename).first()
+    if transcription:
+        db.delete(transcription)
+        print("✅ Deleted transcript from DB")
+
+    # 🗑️ Finally delete video record
+    db.delete(video_record)
+
+    # Commit all DB deletions
+    db.commit()
+    print("✅ All related records deleted from DB")
+
+    return {"message": f"All data related to '{filename}' has been deleted."}
 
 
 
@@ -405,6 +455,25 @@ def get_clips(
         ]
     }
 
+@app.delete("/clip/")
+def delete_clip(
+    clip_id: str = Query(...),
+    db: Session = Depends(get_db)
+):
+    clip = db.query(Clip).filter(Clip.id == clip_id).first()
+    if not clip:
+        raise HTTPException(status_code=404, detail="Clip not found")
+
+    # Delete from S3
+    try:
+        clip_s3_key = clip.clip_url.split(f"https://{AWS_S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/")[-1]
+        s3_client.delete_object(Bucket=AWS_S3_BUCKET, Key=clip_s3_key)
+    except Exception as e:
+        print(f"❌ Failed to delete from S3: {e}")
+
+    db.delete(clip)
+    db.commit()
+    return {"message": f"Clip {clip_id} deleted."}
 
 
 
