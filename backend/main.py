@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Depends, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Depends, BackgroundTasks, Body
 import uvicorn
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -6,13 +6,13 @@ from sqlalchemy.orm import Session
 import os
 from services.video_processing import extract_audio
 from services.transcription import transcribe_audio
-from services.database import SessionLocal, engine, Transcription, init_db, Video, Clip
+from services.database import SessionLocal, engine, Transcription, init_db, Video, Clip, Hashtag
 from services.clips_generator import generate_clip
 from typing import List
+from pydantic import BaseModel
 
 #testing ai clip gen
 from services.ai_clip_selector import run_pipeline_and_return_highlights
-from fastapi import Body
 import json  
 import glob
 
@@ -22,6 +22,7 @@ from uuid import uuid4
 import io
 from botocore.exceptions import NoCredentialsError
 import requests
+from services.hashtag_generator import generate_hashtags_from_transcript
 
 
 load_dotenv()  # Load environment variables
@@ -76,8 +77,15 @@ s3_client = boto3.client(
     region_name=AWS_REGION,
 )
 
+# Define Pydantic models for request/response
+class HashtagBase(BaseModel):
+    name: str
 
+class HashtagCreate(HashtagBase):
+    pass
 
+class HashtagResponse(HashtagBase):
+    videos: List[str] = []
 
 @app.get("/")
 def read_root():
@@ -99,7 +107,7 @@ async def upload_video(
 
     # Check if the video already exists in the DB
     existing_video = db.query(Video).filter(Video.filename == file.filename).first()
-    if existing_video:
+    if (existing_video):
         print(f"⚠️ Video '{file.filename}' already exists in DB. Skipping re-upload.")
         return {
             "filename": existing_video.filename, 
@@ -401,12 +409,46 @@ def generate_ai_clips(
             db.commit()
             print(f"✅ Clip {i} metadata saved in DB")
 
+            # ✅ Generate hashtags for each clip using the transcript segment
+            clip_hashtags = []
+            segment_text = highlight.get("quote", "")
+            if segment_text:
+                try:
+                    # Create a mini transcript-like object the generator can process
+                    segment_transcript = json.dumps({"text": segment_text})
+                    clip_hashtags = generate_hashtags_from_transcript(segment_transcript, num_hashtags=3)
+                    
+                    # Save hashtags to database
+                    for tag in clip_hashtags:
+                        # Create hashtag if it doesn't exist
+                        db_hashtag = db.query(Hashtag).filter(Hashtag.name == tag).first()
+                        if not db_hashtag:
+                            db_hashtag = Hashtag(name=tag)
+                            db.add(db_hashtag)
+                            db.commit()
+                        
+                        # Associate hashtag with the clip
+                        if db_hashtag not in db_clip.hashtags:
+                            db_clip.hashtags.append(db_hashtag)
+                    
+                    # Also associate hashtags with the main video
+                    for tag in clip_hashtags:
+                        db_hashtag = db.query(Hashtag).filter(Hashtag.name == tag).first()
+                        if db_hashtag not in video_record.hashtags:
+                            video_record.hashtags.append(db_hashtag)
+                    
+                    db.commit()
+                    print(f"✅ Hashtags generated and saved for clip {i}: {clip_hashtags}")
+                except Exception as e:
+                    print(f"❌ ERROR: Failed to generate hashtags for clip {i}: {e}")
+
             clips.append({
                 "clip_index": i,
                 "start": start,
                 "end": end,
                 "text": text,
-                "clip_url": clip_url
+                "clip_url": clip_url,
+                "hashtags": clip_hashtags
             })
 
             # ✅ Delete the local clip file after uploading
@@ -421,9 +463,31 @@ def generate_ai_clips(
     os.remove(local_video_path)
     print(f"🗑️ Deleted local original video: {local_video_path}")
 
+    # 8️⃣ Generate overall hashtags for the complete video if not already present
+    if len(video_record.hashtags) == 0:
+        try:
+            video_hashtags = generate_hashtags_from_transcript(record.transcript, num_hashtags=5)
+            
+            # Save hashtags to database
+            for tag in video_hashtags:
+                # Create hashtag if it doesn't exist
+                db_hashtag = db.query(Hashtag).filter(Hashtag.name == tag).first()
+                if not db_hashtag:
+                    db_hashtag = Hashtag(name=tag)
+                    db.add(db_hashtag)
+                    db.commit()
+                
+                # Associate hashtag with the video
+                if db_hashtag not in video_record.hashtags:
+                    video_record.hashtags.append(db_hashtag)
+            
+            db.commit()
+            print(f"✅ Overall hashtags generated and saved for video: {video_hashtags}")
+        except Exception as e:
+            print(f"❌ ERROR: Failed to generate overall hashtags: {e}")
+
     print(f"✅ AI Clip Generation Completed for {filename}")
     return {"filename": filename, "clips": clips}
-
 
 @app.get("/get-clips/")
 def get_clips(
@@ -475,9 +539,200 @@ def delete_clip(
     db.commit()
     return {"message": f"Clip {clip_id} deleted."}
 
+@app.post("/generate-clip-hashtags/")
+async def generate_clip_hashtags(
+    clip_id: str = Body(..., embed=True),
+    db: Session = Depends(get_db)
+):
+    """
+    Generate hashtags for a specific clip based on its content.
+    """
+    # Check if clip exists
+    clip = db.query(Clip).filter(Clip.id == clip_id).first()
+    if not clip:
+        raise HTTPException(status_code=404, detail="Clip not found")
+    
+    # Get the video's transcript
+    transcript_record = db.query(Transcription).filter(Transcription.filename == clip.filename).first()
+    if not transcript_record:
+        raise HTTPException(status_code=404, detail="Transcript not found for this video")
+    
+    try:
+        # Parse transcript
+        transcript_data = json.loads(transcript_record.transcript)
+        
+        # Find segments that overlap with the clip's time range
+        segments = transcript_data.get("segments", [])
+        clip_segments = []
+        
+        for segment in segments:
+            seg_start = float(segment.get("start", 0))
+            seg_end = float(segment.get("end", 0))
+            
+            # Check if segment overlaps with clip time range
+            if (seg_start <= clip.end_time and seg_end >= clip.start_time):
+                clip_segments.append(segment)
+        
+        # Create a mini-transcript with just the clip segments
+        clip_text = " ".join([seg.get("text", "") for seg in clip_segments])
+        mini_transcript = json.dumps({"text": clip_text})
+        
+        # Generate hashtags
+        hashtags = generate_hashtags_from_transcript(mini_transcript, num_hashtags=5)
+        
+        # Store hashtags in database
+        for tag in hashtags:
+            # Check if hashtag already exists
+            db_hashtag = db.query(Hashtag).filter(Hashtag.name == tag).first()
+            if not db_hashtag:
+                db_hashtag = Hashtag(name=tag)
+                db.add(db_hashtag)
+                db.commit()
+            
+            # Link hashtag to clip if not already linked
+            if db_hashtag not in clip.hashtags:
+                clip.hashtags.append(db_hashtag)
+        
+        db.commit()
+        
+        return {"clip_id": clip_id, "hashtags": hashtags}
+    
+    except Exception as e:
+        print(f"❌ ERROR: Failed to generate clip hashtags: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate hashtags: {str(e)}")
 
+# Generate hashtags for a video based on its transcript
+@app.post("/generate-hashtags/")
+async def generate_hashtags(
+    filename: str = Body(..., embed=True),
+    db: Session = Depends(get_db)
+):
+    """
+    Generate hashtags for a video based on its transcript and store them in the database.
+    """
+    # Check if video exists
+    video = db.query(Video).filter(Video.filename == filename).first()
+    if not video:
+        raise HTTPException(status_code=404, detail=f"Video '{filename}' not found")
+    
+    # Get transcript
+    transcript_record = db.query(Transcription).filter(Transcription.filename == filename).first()
+    if not transcript_record:
+        raise HTTPException(status_code=404, detail="Transcript not found for this video")
+    
+    # Generate hashtags
+    hashtags = generate_hashtags_from_transcript(transcript_record.transcript)
+    
+    # Store hashtags in database
+    for tag in hashtags:
+        # Check if hashtag already exists
+        db_hashtag = db.query(Hashtag).filter(Hashtag.name == tag).first()
+        if not db_hashtag:
+            db_hashtag = Hashtag(name=tag)
+            db.add(db_hashtag)
+        
+        # Link hashtag to video if not already linked
+        if db_hashtag not in video.hashtags:
+            video.hashtags.append(db_hashtag)
+    
+    db.commit()
+    
+    return {"filename": filename, "hashtags": hashtags}
 
+# Get hashtags for a specific video
+@app.get("/video-hashtags/")
+async def get_video_hashtags(
+    filename: str = Query(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Get all hashtags associated with a specific video.
+    """
+    video = db.query(Video).filter(Video.filename == filename).first()
+    if not video:
+        raise HTTPException(status_code=404, detail=f"Video '{filename}' not found")
+    
+    return {
+        "filename": filename,
+        "hashtags": [hashtag.name for hashtag in video.hashtags]
+    }
 
+# Get hashtags for a specific clip
+@app.get("/clip-hashtags/")
+async def get_clip_hashtags(
+    clip_id: str = Query(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Get all hashtags associated with a specific clip.
+    """
+    clip = db.query(Clip).filter(Clip.id == clip_id).first()
+    if not clip:
+        raise HTTPException(status_code=404, detail="Clip not found")
+    
+    return {
+        "clip_id": clip_id,
+        "hashtags": [hashtag.name for hashtag in clip.hashtags]
+    }
+
+# Add custom hashtags to a video
+@app.post("/add-video-hashtag/")
+async def add_video_hashtag(
+    filename: str = Body(...),
+    hashtag: str = Body(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Add a custom hashtag to a video.
+    """
+    video = db.query(Video).filter(Video.filename == filename).first()
+    if not video:
+        raise HTTPException(status_code=404, detail=f"Video '{filename}' not found")
+    
+    # Normalize hashtag (remove # if present, convert to lowercase)
+    hashtag = hashtag.lstrip('#').lower()
+    
+    # Check if hashtag already exists
+    db_hashtag = db.query(Hashtag).filter(Hashtag.name == hashtag).first()
+    if not db_hashtag:
+        db_hashtag = Hashtag(name=hashtag)
+        db.add(db_hashtag)
+    
+    # Link hashtag to video if not already linked
+    if db_hashtag not in video.hashtags:
+        video.hashtags.append(db_hashtag)
+        db.commit()
+        return {"message": f"Hashtag '#{hashtag}' added to video '{filename}'"}
+    else:
+        return {"message": f"Hashtag '#{hashtag}' already exists for video '{filename}'"}
+
+# Remove a hashtag from a video
+@app.delete("/remove-video-hashtag/")
+async def remove_video_hashtag(
+    filename: str = Query(...),
+    hashtag: str = Query(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Remove a hashtag from a video.
+    """
+    video = db.query(Video).filter(Video.filename == filename).first()
+    if not video:
+        raise HTTPException(status_code=404, detail=f"Video '{filename}' not found")
+    
+    # Normalize hashtag
+    hashtag = hashtag.lstrip('#').lower()
+    
+    # Find hashtag
+    db_hashtag = db.query(Hashtag).filter(Hashtag.name == hashtag).first()
+    if not db_hashtag or db_hashtag not in video.hashtags:
+        raise HTTPException(status_code=404, detail=f"Hashtag '#{hashtag}' not found for this video")
+    
+    # Remove association between video and hashtag
+    video.hashtags.remove(db_hashtag)
+    db.commit()
+    
+    return {"message": f"Hashtag '#{hashtag}' removed from video '{filename}'"}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)
