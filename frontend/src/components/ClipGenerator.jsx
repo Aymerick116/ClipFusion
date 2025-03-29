@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import axios from "axios";
 
 export default function ClipGenerator() {
@@ -9,6 +9,9 @@ export default function ClipGenerator() {
   const [aiClips, setAiClips] = useState([]);
   const [loading, setLoading] = useState(false);
   const [loadingAi, setLoadingAi] = useState(false);
+  const [subtitlesEnabled, setSubtitlesEnabled] = useState(false);
+  const clipRefs = useRef({});
+  const aiClipRefs = useRef({});
 
   useEffect(() => {
     axios
@@ -16,6 +19,29 @@ export default function ClipGenerator() {
       .then((res) => setVideos(res.data.videos || []))
       .catch((err) => console.error("Error fetching videos:", err));
   }, []);
+
+  // Effect to handle subtitle visibility when toggled
+  useEffect(() => {
+    // Handle manual clips' subtitles
+    Object.values(clipRefs.current).forEach(videoElement => {
+      if (videoElement) {
+        const tracks = videoElement.textTracks;
+        for (let i = 0; i < tracks.length; i++) {
+          tracks[i].mode = subtitlesEnabled ? 'showing' : 'hidden';
+        }
+      }
+    });
+
+    // Handle AI clips' subtitles
+    Object.values(aiClipRefs.current).forEach(videoElement => {
+      if (videoElement) {
+        const tracks = videoElement.textTracks;
+        for (let i = 0; i < tracks.length; i++) {
+          tracks[i].mode = subtitlesEnabled ? 'showing' : 'hidden';
+        }
+      }
+    });
+  }, [subtitlesEnabled]);
 
   const updateTimestamp = (index, field, value) => {
     const updated = [...timestamps];
@@ -68,11 +94,76 @@ export default function ClipGenerator() {
     }
   };
 
+  // Toggle subtitles on/off
+  const toggleSubtitles = () => {
+    setSubtitlesEnabled(prev => !prev);
+  };
+
+  // Fetch transcript for a clip to generate subtitle tracks
+  const fetchTranscriptForClip = async (videoFilename, startTime, endTime) => {
+    try {
+      const response = await axios.get(`http://localhost:8000/transcript/`, {
+        params: { filename: videoFilename }
+      });
+      
+      if (response.data && response.data.transcript) {
+        // Parse the transcript JSON string
+        const transcriptData = JSON.parse(response.data.transcript);
+        const segments = transcriptData.segments || [];
+        
+        // Filter segments to only include those within the clip's time range
+        return segments.filter(seg => 
+          parseFloat(seg.start) >= startTime && 
+          parseFloat(seg.end) <= endTime
+        );
+      }
+      return [];
+    } catch (error) {
+      console.error("Error fetching transcript for clip:", error);
+      return [];
+    }
+  };
+
+  // Create a WebVTT subtitle blob URL from transcript segments
+  const createSubtitleBlobUrl = (segments) => {
+    if (!segments || segments.length === 0) return null;
+    
+    let vttContent = "WEBVTT\n\n";
+    
+    segments.forEach((segment, index) => {
+      const startTime = formatVttTime(parseFloat(segment.start));
+      const endTime = formatVttTime(parseFloat(segment.end));
+      vttContent += `${index + 1}\n${startTime} --> ${endTime}\n${segment.text}\n\n`;
+    });
+    
+    const blob = new Blob([vttContent], { type: "text/vtt" });
+    return URL.createObjectURL(blob);
+  };
+  
+  // Format time for WebVTT (HH:MM:SS.mmm)
+  const formatVttTime = (seconds) => {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+    const milliseconds = Math.floor((seconds % 1) * 1000);
+    
+    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${String(milliseconds).padStart(3, '0')}`;
+  };
+
   return (
     <div className="max-w-2xl mx-auto p-6">
       <h2 className="text-2xl font-bold mb-4">🎬 Clip Generator</h2>
 
-      <label className="block mb-2 font-semibold">Select Video:</label>
+      <div className="flex justify-between items-center mb-4">
+        <label className="block font-semibold">Select Video:</label>
+        <button
+          onClick={toggleSubtitles}
+          className="bg-gray-700 text-white px-3 py-1 rounded-md text-sm hover:bg-gray-600 transition"
+        >
+          {subtitlesEnabled ? "CC ON" : "CC OFF"}
+        </button>
+      </div>
+
       <select
         value={selectedVideo}
         onChange={(e) => setSelectedVideo(e.target.value)}
@@ -143,20 +234,67 @@ export default function ClipGenerator() {
           <h3 className="text-lg font-semibold mb-4">🧾 Manual Clips:</h3>
           <div className="space-y-4">
             {clips.map((clip) => (
-              <div key={clip.clip_index}>
+              <div key={clip.clip_index} className="relative">
                 <p className="text-sm text-gray-700 mb-1">
                   Clip {clip.clip_index}: {clip.start}s - {clip.end}s
                 </p>
-                <video
-                  key={`${clip.clip_index}-${Date.now()}`}
-                  controls
-                  className="w-full rounded shadow"
-                >
-                  <source
-                    src={`http://localhost:8000${clip.clip_url}?t=${Date.now()}`}
-                    type="video/mp4"
-                  />
-                </video>
+                <div className="relative">
+                  <video
+                    ref={el => clipRefs.current[clip.clip_index] = el}
+                    controls
+                    className="w-full rounded shadow"
+                    onLoadedData={async () => {
+                      // Fetch transcript segments for this clip
+                      const segments = await fetchTranscriptForClip(
+                        selectedVideo, 
+                        parseFloat(clip.start), 
+                        parseFloat(clip.end)
+                      );
+                      
+                      if (segments.length > 0) {
+                        const subtitleUrl = createSubtitleBlobUrl(segments);
+                        const videoElement = clipRefs.current[clip.clip_index];
+                        
+                        if (subtitleUrl && videoElement) {
+                          // Remove existing tracks
+                          while (videoElement.firstChild) {
+                            if (videoElement.firstChild.tagName === 'TRACK') {
+                              videoElement.removeChild(videoElement.firstChild);
+                            } else {
+                              break;
+                            }
+                          }
+                          
+                          // Add the new subtitle track
+                          const track = document.createElement('track');
+                          track.kind = 'subtitles';
+                          track.label = 'English';
+                          track.srclang = 'en';
+                          track.src = subtitleUrl;
+                          videoElement.appendChild(track);
+                          
+                          // Set the mode based on current state
+                          if (videoElement.textTracks[0]) {
+                            videoElement.textTracks[0].mode = subtitlesEnabled ? 'showing' : 'hidden';
+                          }
+                        }
+                      }
+                    }}
+                  >
+                    <source
+                      src={`http://localhost:8000${clip.clip_url}?t=${Date.now()}`}
+                      type="video/mp4"
+                    />
+                  </video>
+                  
+                  {/* Small CC toggle button */}
+                  <button
+                    onClick={toggleSubtitles}
+                    className="absolute bottom-2 right-2 bg-black bg-opacity-60 text-white text-xs px-2 py-0.5 rounded-full hover:bg-opacity-80"
+                  >
+                    {subtitlesEnabled ? "CC ON" : "CC OFF"}
+                  </button>
+                </div>
               </div>
             ))}
           </div>
@@ -170,16 +308,64 @@ export default function ClipGenerator() {
           <div className="space-y-6">
             {aiClips.map((clip) => (
               <div key={clip.clip_index}>
-                <video
-                  controls
-                  className="w-full rounded shadow mb-2"
-                  key={`${clip.clip_index}-${clip.start}`}
-                >
-                  <source
-                    src={`http://localhost:8000${clip.clip_url}?t=${Date.now()}`}
-                    type="video/mp4"
-                  />
-                </video>
+                <div className="relative">
+                  <video
+                    ref={el => aiClipRefs.current[clip.clip_index] = el}
+                    controls
+                    className="w-full rounded shadow mb-2"
+                    onLoadedData={async () => {
+                      // Fetch transcript segments for this AI clip
+                      const segments = await fetchTranscriptForClip(
+                        selectedVideo, 
+                        parseFloat(clip.start), 
+                        parseFloat(clip.end)
+                      );
+                      
+                      if (segments.length > 0) {
+                        const subtitleUrl = createSubtitleBlobUrl(segments);
+                        const videoElement = aiClipRefs.current[clip.clip_index];
+                        
+                        if (subtitleUrl && videoElement) {
+                          // Remove existing tracks
+                          while (videoElement.firstChild) {
+                            if (videoElement.firstChild.tagName === 'TRACK') {
+                              videoElement.removeChild(videoElement.firstChild);
+                            } else {
+                              break;
+                            }
+                          }
+                          
+                          // Add the new subtitle track
+                          const track = document.createElement('track');
+                          track.kind = 'subtitles';
+                          track.label = 'English';
+                          track.srclang = 'en';
+                          track.src = subtitleUrl;
+                          videoElement.appendChild(track);
+                          
+                          // Set the mode based on current state
+                          if (videoElement.textTracks[0]) {
+                            videoElement.textTracks[0].mode = subtitlesEnabled ? 'showing' : 'hidden';
+                          }
+                        }
+                      }
+                    }}
+                  >
+                    <source
+                      src={`http://localhost:8000${clip.clip_url}?t=${Date.now()}`}
+                      type="video/mp4"
+                    />
+                  </video>
+                  
+                  {/* Small CC toggle button */}
+                  <button
+                    onClick={toggleSubtitles}
+                    className="absolute bottom-2 right-2 bg-black bg-opacity-60 text-white text-xs px-2 py-0.5 rounded-full hover:bg-opacity-80"
+                  >
+                    {subtitlesEnabled ? "CC ON" : "CC OFF"}
+                  </button>
+                </div>
+                
                 <p className="italic text-gray-800 text-sm">
                   "{clip.text}"
                 </p>
@@ -187,12 +373,12 @@ export default function ClipGenerator() {
                   Time: {clip.start}s – {clip.end}s
                 </p>
                 <a
-  href={`http://localhost:8000${clip.clip_url}`}
-  download
-  className="inline-block mt-1 text-sm text-indigo-600 hover:underline"
->
-  ⬇️ Download AI Clip
-</a>
+                  href={`http://localhost:8000${clip.clip_url}`}
+                  download
+                  className="inline-block mt-1 text-sm text-indigo-600 hover:underline"
+                >
+                  ⬇️ Download AI Clip
+                </a>
               </div>
             ))}
           </div>
@@ -201,148 +387,3 @@ export default function ClipGenerator() {
     </div>
   );
 }
-
-
-
-
-
-
-
-
-
-
-
-// import { useState, useEffect } from "react";
-// import axios from "axios";
-
-// export default function ClipGenerator() {
-//   const [videos, setVideos] = useState([]);
-//   const [selectedVideo, setSelectedVideo] = useState("");
-//   const [timestamps, setTimestamps] = useState([{ start: "", end: "" }]);
-//   const [clips, setClips] = useState([]);
-//   const [loading, setLoading] = useState(false);
-
-//   // Fetch uploaded video filenames
-//   useEffect(() => {
-//     axios.get("http://localhost:8000/videos/")
-//       .then(res => setVideos(res.data.videos || []))
-//       .catch(err => console.error("Error fetching videos:", err));
-//   }, []);
-
-//   const updateTimestamp = (index, field, value) => {
-//     const updated = [...timestamps];
-//     updated[index][field] = value;
-//     setTimestamps(updated);
-//   };
-
-//   const addTimestamp = () => {
-//     setTimestamps([...timestamps, { start: "", end: "" }]);
-//   };
-
-//   const generateClips = async () => {
-//     if (!selectedVideo) return;
-
-//     const queryParams = new URLSearchParams();
-//     queryParams.append("filename", selectedVideo);
-//     timestamps.forEach(({ start, end }) => {
-//       if (start && end) {
-//         queryParams.append("timestamps", start);
-//         queryParams.append("timestamps", end);
-//       }
-//     });
-
-//     setLoading(true);
-//     try {
-//       const response = await axios.post(
-//         `http://localhost:8000/generate-clips/?${queryParams.toString()}`
-//       );
-//       setClips(response.data.clips || []);
-//     } catch (error) {
-//       console.error("Error generating clips:", error);
-//     } finally {
-//       setLoading(false);
-//     }
-//   };
-
-//   return (
-//     <div className="max-w-2xl mx-auto p-6">
-//       <h2 className="text-2xl font-bold mb-4">🎬 Clip Generator</h2>
-
-//       <label className="block mb-2 font-semibold">Select Video:</label>
-//       <select
-//         value={selectedVideo}
-//         onChange={(e) => setSelectedVideo(e.target.value)}
-//         className="w-full p-2 mb-4 border rounded"
-//       >
-//         <option value="">-- Choose a video --</option>
-//         {videos.map((video) => (
-//           <option key={video} value={video}>
-//             {video}
-//           </option>
-//         ))}
-//       </select>
-
-//       <div className="space-y-4">
-//         {timestamps.map((ts, index) => (
-//           <div key={index} className="flex gap-2 items-end">
-//             <div className="flex-1">
-//               <label className="block text-sm font-medium">Start Time (s)</label>
-//               <input
-//                 type="number"
-//                 value={ts.start}
-//                 onChange={(e) => updateTimestamp(index, "start", e.target.value)}
-//                 className="w-full p-2 border rounded"
-//               />
-//             </div>
-//             <div className="flex-1">
-//               <label className="block text-sm font-medium">End Time (s)</label>
-//               <input
-//                 type="number"
-//                 value={ts.end}
-//                 onChange={(e) => updateTimestamp(index, "end", e.target.value)}
-//                 className="w-full p-2 border rounded"
-//               />
-//             </div>
-//           </div>
-//         ))}
-
-//         <button
-//           onClick={addTimestamp}
-//           className="text-sm text-blue-600 hover:underline"
-//         >
-//           + Add another clip range
-//         </button>
-//       </div>
-
-//       <button
-//         onClick={generateClips}
-//         disabled={!selectedVideo || loading}
-//         className="mt-6 px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
-//       >
-//         {loading ? "Generating..." : "Generate Clips"}
-//       </button>
-
-//       {clips.length > 0 && (
-//         <div className="mt-8">
-//           <h3 className="text-lg font-semibold mb-4">🧾 Generated Clips:</h3>
-//           <div className="space-y-4">
-//             {clips.map((clip) => (
-//               <div key={clip.clip_index}>
-//                 <p className="text-sm text-gray-700 mb-1">
-//                   Clip {clip.clip_index}: {clip.start}s - {clip.end}s
-//                 </p>
-//                 <video key={`${clip.clip_index}-${Date.now()}`}  controls className="w-full rounded shadow">
-//                   <source
-//                     src={`http://localhost:8000${clip.clip_url}?t=${Date.now()}`}
-//                     type="video/mp4"
-//                   />
-//                 </video>
-//                 {/* {console.log(clip.clip_url)} */}
-//               </div>
-//             ))}
-//           </div>
-//         </div>
-//       )}
-//     </div>
-//   );
-// }
