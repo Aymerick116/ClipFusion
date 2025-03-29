@@ -95,7 +95,9 @@ const Dashboard = () => {
           ) : error ? (
             <p className="text-red-400 text-center">{error}</p>
           ) : videos.length > 0 ? (
-            <VideoList videos={videos} />
+            // <VideoList videos={videos} />
+            <VideoList videos={videos} setVideos={setVideos} />
+
           ) : (
             <p className="text-gray-500 text-center w-full">No videos uploaded yet. 📁</p>
           )}
