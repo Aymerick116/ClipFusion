@@ -9,8 +9,6 @@ from services.transcription import transcribe_audio
 from services.database import SessionLocal, engine, Transcription, init_db, Video, Clip
 from services.clips_generator import generate_clip
 from typing import List
-
-#testing ai clip gen
 from services.ai_clip_selector import run_pipeline_and_return_highlights
 from fastapi import Body
 import json  
@@ -23,14 +21,14 @@ import io
 from botocore.exceptions import NoCredentialsError
 import requests
 
+from services.ecs_launcher import launch_ecs_task
+import time
 
 load_dotenv()  # Load environment variables
 app = FastAPI()
 
 UPLOAD_FOLDER = "uploads"
-# Directory where clips are saved
-# CLIP_FOLDER = "/Users/aymerickosse/ClipFusion/backend/clips"
-# Define temporary storage for downloaded videos
+
 TEMP_DOWNLOAD_FOLDER = "temp"
 CLIP_FOLDER = "clips"
 os.makedirs(TEMP_DOWNLOAD_FOLDER, exist_ok=True)
@@ -79,10 +77,24 @@ s3_client = boto3.client(
 
 
 
+def wait_for_s3_file(bucket: str, key: str, timeout: int = 60):
+    """Polls S3 until a file appears or times out."""
+    for _ in range(timeout):
+        try:
+            s3_client.head_object(Bucket=bucket, Key=key)
+            print(f"✅ Found {key} in S3.")
+            return True
+        except s3_client.exceptions.ClientError:
+            print(f"⏳ Waiting for {key} to appear in S3...")
+            time.sleep(1)
+    raise Exception(f"⏰ Timeout waiting for {key} in S3.")
+
+
 @app.get("/")
 def read_root():
     print("🌐 GET / called")
     return {"message": "Welcome to ClipFusion API"}
+
 
 
 
@@ -135,48 +147,53 @@ async def upload_video(
     }
 
 def transcribe_and_store(filename: str, db: Session):
-    """
-    Downloads the video from S3, extracts audio, transcribes it, and stores the transcript in the database.
-    Deletes extracted audio from S3 after transcription.
-    """
-    print(f"📝 Fetching video details from DB: {filename}")
-
-    # ✅ Fetch video metadata from the DB
     video_record = db.query(Video).filter(Video.filename == filename).first()
     if not video_record:
-        raise HTTPException(status_code=404, detail=f"❌ Video '{filename}' not found in database.")
+        raise HTTPException(status_code=404, detail="❌ Video not found in DB")
 
     s3_url = video_record.s3_url
-    print(f"🎥 Found S3 URL: {s3_url}")
+    video_s3_key = s3_url.split(f"https://{AWS_S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/")[-1]
 
-    # ✅ Extract audio and upload to S3
-    audio_s3_url = extract_audio(s3_url, filename)
+    audio_filename = f"{uuid4()}_{filename.rsplit('.', 1)[0]}.mp3"
+    audio_key = f"audios/{audio_filename}"
+    audio_s3_url = f"https://{AWS_S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{audio_key}"
 
-    # ✅ Transcribe using S3 audio URL
-    transcript = transcribe_audio(audio_s3_url)
+    try:
+        print("🚀 Launching ECS task to extract audio...")
+        launch_ecs_task(
+            mode="extract_audio",
+            bucket=AWS_S3_BUCKET,
+            input_key=video_s3_key,
+            output_key=audio_key
+        )
 
-    if not transcript:
-        raise HTTPException(status_code=500, detail="❌ Transcription failed")
+        # ⏳ Wait until audio is available in S3
+        wait_for_s3_file(AWS_S3_BUCKET, audio_key)
 
-    # ✅ Save transcript in the database
-    db_transcription = Transcription(
-        filename=filename,
-        transcript=json.dumps(transcript)  # Store as JSON
-    )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"❌ ECS audio extraction or wait failed: {e}")
+
+    # ✅ Transcribe from S3 audio URL
+    try:
+        transcript = transcribe_audio(audio_s3_url)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"❌ Transcription failed: {e}")
+
+    # ✅ Save transcript in DB
+    db_transcription = Transcription(filename=filename, transcript=json.dumps(transcript))
     db.add(db_transcription)
     db.commit()
 
-    print(f"✅ Transcription saved for {filename}")
-
-    # ✅ Delete extracted audio from S3 after transcription
-    audio_s3_key = audio_s3_url.split(f"https://{AWS_S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/")[-1]
+    # ✅ Optionally clean up
     try:
-        s3_client.delete_object(Bucket=AWS_S3_BUCKET, Key=audio_s3_key)
-        print(f"🗑️ Deleted audio from S3: {audio_s3_key}")
+        s3_client.delete_object(Bucket=AWS_S3_BUCKET, Key=audio_key)
+        print(f"🗑️ Deleted temp audio from S3: {audio_key}")
     except Exception as e:
-        print(f"❌ Failed to delete audio from S3: {e}")
+        print(f"⚠️ Could not delete audio file from S3: {e}")
 
     return transcript
+
+
 
 
 
@@ -333,26 +350,15 @@ def generate_ai_clips(
         raise HTTPException(status_code=404, detail=f"Video '{filename}' not found in database.")
 
     s3_url = video_record.s3_url
-    print(f"🎥 Found S3 URL: {s3_url}")
+    video_s3_key = s3_url.split(f"https://{AWS_S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/")[-1]
+    print(f"🎥 Found S3 key: {video_s3_key}")
 
-    # 2️⃣ Download video from S3
-    local_video_path = os.path.join(TEMP_DOWNLOAD_FOLDER, filename)
-    try:
-        response = requests.get(s3_url, stream=True)
-        response.raise_for_status()
-        with open(local_video_path, "wb") as video_file:
-            for chunk in response.iter_content(chunk_size=8192):
-                video_file.write(chunk)
-        print(f"✅ Video downloaded: {local_video_path}")
-    except requests.RequestException as e:
-        raise HTTPException(status_code=500, detail=f"❌ Failed to download video from S3: {e}")
-
-    # 3️⃣ Fetch transcript from DB
+    # 2️⃣ Fetch transcript from DB
     record = db.query(Transcription).filter(Transcription.filename == filename).first()
     if not record:
         raise HTTPException(status_code=404, detail="Transcript not found")
 
-    # 4️⃣ Load JSON from transcript field
+    # 3️⃣ Load JSON from transcript field
     try:
         transcript_data = json.loads(record.transcript)
     except json.JSONDecodeError:
@@ -362,34 +368,38 @@ def generate_ai_clips(
     if not segments:
         raise HTTPException(status_code=400, detail="No segments found in transcript.")
 
-    # 5️⃣ Use AI to get top emotional/interesting highlights
+    # 4️⃣ Use AI to get top emotional/interesting highlights
     try:
         top_highlights = run_pipeline_and_return_highlights(segments, top_n=3)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"LLM analysis failed: {e}")
 
-    # 6️⃣ Generate clips, upload to S3, and save to DB
+    # 5️⃣ Generate ECS tasks to create clips
     clips = []
     for i, highlight in enumerate(top_highlights):
         start = highlight["start"]
         end = highlight["end"]
         text = highlight["quote"]
 
+        output_key = f"clips/{uuid4()}_{filename}_clip{i}.mp4"
+        clip_url = f"https://{AWS_S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{output_key}"
+
         try:
-            print(f"🎬 Generating Clip {i} for {filename} (Start: {start}, End: {end})")
+            print(f"🚀 Launching ECS task to generate clip {i} (Start: {start}, End: {end})")
 
-            # ✅ Generate clip
-            clip_path = generate_clip(local_video_path, start, end, clip_index=i)
+            ecs_response = launch_ecs_task(
+                mode="generate_clip",
+                bucket=AWS_S3_BUCKET,
+                input_key=video_s3_key,
+                output_key=output_key,
+                start=start,
+                end=end
+            )
 
-            # ✅ Upload clip to S3
-            clip_s3_key = f"clips/{os.path.basename(clip_path)}"
-            clip_url = upload_to_s3(clip_path, clip_s3_key)
+            task_arn = ecs_response["tasks"][0]["taskArn"]
+            print(f"✅ ECS task launched for clip {i}: {task_arn}")
 
-            if not clip_url:
-                print(f"❌ ERROR: Clip {i} failed to upload.")
-                continue  # Skip to next clip
-
-            # ✅ Store clip metadata in DB
+            # Save metadata in DB
             db_clip = Clip(
                 id=str(uuid4()),
                 filename=filename,
@@ -406,22 +416,15 @@ def generate_ai_clips(
                 "start": start,
                 "end": end,
                 "text": text,
-                "clip_url": clip_url
+                "clip_url": clip_url,
+                "task_arn": task_arn
             })
 
-            # ✅ Delete the local clip file after uploading
-            os.remove(clip_path)
-            print(f"🗑️ Deleted local clip: {clip_path}")
-
         except Exception as e:
-            print(f"❌ ERROR: Failed to process clip {i}: {e}")
+            print(f"❌ Failed to launch ECS for clip {i}: {e}")
             continue
 
-    # 7️⃣ Clean up: Delete local video file after processing
-    os.remove(local_video_path)
-    print(f"🗑️ Deleted local original video: {local_video_path}")
-
-    print(f"✅ AI Clip Generation Completed for {filename}")
+    print(f"✅ All ECS tasks launched for {filename}")
     return {"filename": filename, "clips": clips}
 
 
