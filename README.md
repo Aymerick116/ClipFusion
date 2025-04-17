@@ -1,64 +1,45 @@
 # 🎬 ClipFusion
 
-**ClipFusion** is an AI-powered video editing platform that automatically turns long-form videos into short, engaging clips optimized for platforms like TikTok. With powerful transcription, AI-based highlight detection, and smart hashtag generation, ClipFusion helps creators repurpose their content in seconds.
+**ClipFusion** is an AI-powered video editing platform that transforms long-form videos into short, engaging clips ready for platforms like TikTok. With automatic transcription, AI-based highlight detection, and hashtag generation, ClipFusion helps creators repurpose content in seconds — no editing skills required.
 
 ---
 
 ## 🚀 Features
 
-- 🎥 Upload long videos and extract key highlights automatically  
-- 🧠 AI-powered analysis to detect emotional or interesting moments  
-- ✂️ Serverless video clipping using AWS ECS and FFmpeg  
-- 📝 Transcription using state-of-the-art speech recognition  
-- #️⃣ Automatic hashtag generation for videos and clips  
-- 📤 Post clips directly to TikTok (with user authorization)  
-- 🌐 Full FastAPI backend with PostgreSQL + S3 integration  
+- 🎥 Upload long videos and extract key highlights instantly  
+- 🧠 AI analyzes transcripts to find emotional or engaging moments  
+- ✂️ Serverless video clipping powered by AWS ECS + FFmpeg  
+- 📝 Fast, accurate transcription using state-of-the-art models  
+- #️⃣ Smart hashtag generation to boost discoverability  
+- 📤 Post clips directly to TikTok with user authentication  
+- 🌐 Robust FastAPI backend with PostgreSQL and S3 integration  
 
 ---
 
-## 📸 How It Works
+## 🎞️ Demo
 
-1. Upload your video  
-2. Transcription and AI highlight detection run automatically  
-3. Top moments are clipped using FFmpeg on the cloud  
-4. Hashtags are generated for each clip  
-5. You can download clips or post them directly to TikTok  
+Check out a quick walkthrough of ClipFusion in action:
+
+🔗 [Watch the Demo](https://your-demo-link.com)  
+*(Replace with Loom/YouTube link when ready)*
+
+---
+
+## ⚙️ Tech Stack
+
+| Layer        | Technology                     |
+|--------------|--------------------------------|
+| Backend      | FastAPI, Python, SQLAlchemy    |
+| Cloud        | AWS ECS, S3, Lambda            |
+| AI Services  | OpenAI, Custom LLM Pipelines   |
+| Database     | PostgreSQL                     |
+| Storage      | Amazon S3                      |
+| Auth & API   | TikTok OAuth 2.0 + Video API   |
+| Frontend     | React (optional, not included) |
 
 ---
 
-## 🛠️ Tech Stack
+## 📬 Contact
 
-- **Backend**: Python, FastAPI, SQLAlchemy  
-- **Cloud**: AWS ECS, S3, Lambda  
-- **AI Services**: OpenAI / Custom LLM Pipelines  
-- **Database**: PostgreSQL  
-- **Storage**: Amazon S3  
-- **Frontend (optional)**: React (not included here)  
-- **TikTok Integration**: OAuth 2.0 + Video Upload API  
-
----
-## 🧪 Getting Started
-
-### 1. Clone the repo
-```bash
-git clone https://github.com/yourusername/clipfusion.git
-cd clipfusion
-```
----
-
-
-
-📄 Legal
-
-Privacy Policy
-Terms of Service: https://docs.google.com/document/d/1YrSzmXkCRKTWuB4RE7OlAFb7n-oixtKbypg_13BQMjA/edit?tab=t.0
-🤝 Contributing
-
-Pull requests are welcome! If you’d like to contribute to ClipFusion, please fork the repository and submit a PR. For major changes, open an issue first to discuss what you’d like to change.
-
-📬 Contact
-
-Built by Aymerick Osse
-Got questions or ideas? Email me at aymerickosse@gmail.com
-
-
+Built with 💡 by **Aymerick Osse**  
+Got questions or ideas? Email me at **aymerickosse@gmail.com**
