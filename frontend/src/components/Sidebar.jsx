@@ -1,60 +1,13 @@
-
-
-// import { Link } from "react-router-dom";
-// import { FiHome } from "react-icons/fi";
-// import { useNavigate } from "react-router-dom";
-
-
-// const Sidebar = () => {
-//   const navigate = useNavigate();
-
-//   const handleLogout = () => {
-//     localStorage.removeItem("access_token"); // 🧹 clear token
-//     navigate("/"); // 🔄 redirect to login
-//     window.location.reload(); // optional: resets state
-//   };
-
-
-
-
-//   return (
-//     <aside className="h-screen w-64 bg-gray-950 text-white flex flex-col p-6 shadow-lg">
-//       <div className="flex items-center gap-3 mb-10">
-//         <img src="/avatar.png" alt="User" className="w-12 h-12 rounded-full" />
-//         <span className="text-xl font-bold">aymerickn...</span>
-//       </div>
-
-//       {/* Navigation */}
-//       <nav className="flex-1">
-//         <ul className="space-y-6">
-//           <li>
-//             <Link 
-//               to="/dashboard" 
-//               className="flex items-center gap-3 text-lg font-semibold hover:text-gray-400 transition duration-200"
-//             >
-//               <FiHome size={22} /> Dashboard
-//             </Link>
-//           </li>
-//           {/* Additional Routes will be added here */}
-//         </ul>
-//         <button
-//           onClick={handleLogout}
-//           className="w-full text-left text-red-400 font-semibold hover:text-red-300 transition"
-//         >
-//           Logout
-//         </button>
-//       </nav>
-//     </aside>
-//   );
-// };
-
-// export default Sidebar;
-
 import { Link, useNavigate } from "react-router-dom";
 import { FiHome, FiLogOut } from "react-icons/fi";
+import { jwtDecode } from "jwt-decode";
 
 const Sidebar = () => {
   const navigate = useNavigate();
+
+  const token = localStorage.getItem("access_token");
+  const decoded = token ? jwtDecode(token) : {};
+  const userEmail = decoded?.sub || "anonymous";
 
   const handleLogout = () => {
     localStorage.removeItem("access_token");
@@ -66,9 +19,12 @@ const Sidebar = () => {
     <aside className="h-screen w-64 bg-gray-950 text-white flex flex-col justify-between p-6 shadow-lg">
       {/* User Info */}
       <div>
-        <div className="flex items-center gap-3 mb-10">
+        <div className="flex items-center gap-3 mb-3">
           <img src="/avatar.png" alt="User" className="w-12 h-12 rounded-full" />
-          <span className="text-xl font-bold">aymerickn...</span>
+          <div className="flex flex-col overflow-hidden">
+            <span className="text-xl font-bold truncate max-w-[11rem]">Welcome</span>
+            <span className="text-sm text-gray-400 truncate max-w-[11rem]">{userEmail}</span>
+          </div>
         </div>
 
         {/* Navigation */}
@@ -82,7 +38,6 @@ const Sidebar = () => {
                 <FiHome size={20} /> Dashboard
               </Link>
             </li>
-            {/* Add more links here if needed */}
           </ul>
         </nav>
       </div>

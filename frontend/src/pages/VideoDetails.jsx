@@ -18,7 +18,7 @@ const VideoDetails = () => {
   useEffect(() => {
     const fetchVideoUrl = async () => {
       try {
-        const response = await axios.get("http://127.0.0.1:8000/videos/");
+        const response = await api.get("http://127.0.0.1:8000/videos/");
         const video = response.data.find(v => v.filename === filename);
         if (video) {
           setVideoUrl(video.s3_url);

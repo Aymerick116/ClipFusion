@@ -1,7 +1,9 @@
 import { useState } from "react";
-import axios from "axios";
+
 import { FaUpload, FaMagic, FaGoogleDrive, FaLink } from "react-icons/fa";
 import { toast } from "react-toastify";
+import api from "../api";
+
 
 const Upload = ({ refreshVideos }) => {
   const [file, setFile] = useState(null);
@@ -32,7 +34,7 @@ const Upload = ({ refreshVideos }) => {
     formData.append("file", file);
 
     try {
-      const response = await axios.post("http://127.0.0.1:8000/upload/", formData, {
+      const response = await api.post("http://127.0.0.1:8000/upload/", formData, {
         headers: { "Content-Type": "multipart/form-data" },
       });
 
@@ -64,7 +66,7 @@ const Upload = ({ refreshVideos }) => {
     }
 
     try {
-      await axios.post("http://127.0.0.1:8000/generate-ai-clips/", { filename });
+      await api.post("http://127.0.0.1:8000/generate-ai-clips/", { filename });
       toast.success("✅ AI Clips Generated!");
       refreshVideos();
     } catch (error) {
