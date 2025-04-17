@@ -27,6 +27,11 @@ from services.hashtag_generator import generate_hashtags_from_transcript
 from services.ecs_launcher import launch_ecs_task
 import time
 
+from routes.auth_routes import router as auth_router
+from services.auth_dependency import get_current_user
+from fastapi.openapi.utils import get_openapi
+
+
 load_dotenv()  # Load environment variables
 app = FastAPI()
 
@@ -99,61 +104,148 @@ def wait_for_s3_file(bucket: str, key: str, timeout: int = 60):
     raise Exception(f"⏰ Timeout waiting for {key} in S3.")
 
 
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    openapi_schema = get_openapi(
+        title="ClipFusion API",
+        version="1.0.0",
+        description="Custom auth-enabled API",
+        routes=app.routes,
+    )
+    openapi_schema["components"]["securitySchemes"] = {
+        "bearerAuth": {
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "JWT"
+        }
+    }
+    for path in openapi_schema["paths"].values():
+        for operation in path.values():
+            operation["security"] = [{"bearerAuth": []}]
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi
+
+
 @app.get("/")
 def read_root():
     print("🌐 GET / called")
     return {"message": "Welcome to ClipFusion API"}
 
 
-
+app.include_router(auth_router, prefix="/auth")
 
 @app.post("/upload/")
 async def upload_video(
-    file: UploadFile = File(...), 
-    db: Session = Depends(get_db)
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user)
 ):
     """
     Uploads a video to AWS S3, saves metadata in the database,
     and immediately transcribes it.
     """
     print(f"📤 Uploading video: {file.filename}")
+    user_id = current_user["user_id"]
 
-    # Check if the video already exists in the DB
-    existing_video = db.query(Video).filter(Video.filename == file.filename).first()
-    if (existing_video):
-        print(f"⚠️ Video '{file.filename}' already exists in DB. Skipping re-upload.")
+    # Check if the video already exists for this user
+    existing_video = db.query(Video).filter(
+        Video.filename == file.filename,
+        Video.user_id == user_id
+    ).first()
+
+    if existing_video:
+        print(f"⚠️ Video '{file.filename}' already exists for this user. Skipping re-upload.")
         return {
-            "filename": existing_video.filename, 
-            "s3_url": existing_video.s3_url, 
+            "filename": existing_video.filename,
+            "s3_url": existing_video.s3_url,
             "message": "Video already uploaded."
         }
 
-    # Generate a unique filename to prevent conflicts
+    # Generate a unique S3 filename
     unique_filename = f"{uuid4()}_{file.filename}"
 
-    # Upload file to S3
+    # Upload to S3
     s3_client.upload_fileobj(file.file, AWS_S3_BUCKET, unique_filename)
 
-    # Get the public URL of the uploaded file
+    # Get public S3 URL
     s3_url = f"https://{AWS_S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{unique_filename}"
 
-    # ✅ Store video metadata in the database
-    db_video = Video(filename=file.filename, s3_url=s3_url)
+    # Save to DB with user_id
+    db_video = Video(
+        filename=file.filename,
+        s3_url=s3_url,
+        user_id=user_id
+    )
     db.add(db_video)
     db.commit()
 
-    # 🔄 **Immediately transcribe and store in DB**
+    # Transcribe
     try:
         transcript = transcribe_and_store(file.filename, db)
     except HTTPException as e:
-        return {"filename": file.filename, "s3_url": s3_url, "message": f"Upload successful, but transcription failed: {e.detail}"}
+        return {
+            "filename": file.filename,
+            "s3_url": s3_url,
+            "message": f"Upload successful, but transcription failed: {e.detail}"
+        }
 
     return {
-        "filename": file.filename, 
-        "s3_url": s3_url, 
+        "filename": file.filename,
+        "s3_url": s3_url,
         "transcript": transcript,
         "message": "Upload and transcription successful."
     }
+# @app.post("/upload/")
+# async def upload_video(
+#     file: UploadFile = File(...), 
+#     db: Session = Depends(get_db)
+# ):
+#     """
+#     Uploads a video to AWS S3, saves metadata in the database,
+#     and immediately transcribes it.
+#     """
+#     print(f"📤 Uploading video: {file.filename}")
+
+#     # Check if the video already exists in the DB
+#     existing_video = db.query(Video).filter(Video.filename == file.filename).first()
+#     if (existing_video):
+#         print(f"⚠️ Video '{file.filename}' already exists in DB. Skipping re-upload.")
+#         return {
+#             "filename": existing_video.filename, 
+#             "s3_url": existing_video.s3_url, 
+#             "message": "Video already uploaded."
+#         }
+
+#     # Generate a unique filename to prevent conflicts
+#     unique_filename = f"{uuid4()}_{file.filename}"
+
+#     # Upload file to S3
+#     s3_client.upload_fileobj(file.file, AWS_S3_BUCKET, unique_filename)
+
+#     # Get the public URL of the uploaded file
+#     s3_url = f"https://{AWS_S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{unique_filename}"
+
+#     # ✅ Store video metadata in the database
+#     db_video = Video(filename=file.filename, s3_url=s3_url)
+#     db.add(db_video)
+#     db.commit()
+
+#     # 🔄 **Immediately transcribe and store in DB**
+#     try:
+#         transcript = transcribe_and_store(file.filename, db)
+#     except HTTPException as e:
+#         return {"filename": file.filename, "s3_url": s3_url, "message": f"Upload successful, but transcription failed: {e.detail}"}
+
+#     return {
+#         "filename": file.filename, 
+#         "s3_url": s3_url, 
+#         "transcript": transcript,
+#         "message": "Upload and transcription successful."
+#     }
 
 def transcribe_and_store(filename: str, db: Session):
     video_record = db.query(Video).filter(Video.filename == filename).first()
@@ -206,14 +298,31 @@ def transcribe_and_store(filename: str, db: Session):
 
 
 
-@app.get("/videos/")
-def list_videos(db: Session = Depends(get_db)):
-    """
-    Lists all uploaded videos from the database with their S3 URLs.
-    """
-    print("📂 Fetching all videos from DB")
+# @app.get("/videos/")
+# def list_videos(db: Session = Depends(get_db)):
+#     """
+#     Lists all uploaded videos from the database with their S3 URLs.
+#     """
+#     print("📂 Fetching all videos from DB")
 
-    videos = db.query(Video).all()
+#     videos = db.query(Video).all()
+#     return [
+#         {"filename": video.filename, "s3_url": video.s3_url}
+#         for video in videos
+#     ]
+@app.get("/videos/")
+def list_videos(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user)  # ✅ Require auth
+):
+    """
+    Lists all uploaded videos for the logged-in user.
+    """
+    user_id = current_user["user_id"]
+    print(f"📂 Fetching videos for user: {user_id}")
+
+    videos = db.query(Video).filter(Video.user_id == user_id).all()
+
     return [
         {"filename": video.filename, "s3_url": video.s3_url}
         for video in videos
@@ -345,29 +454,33 @@ def upload_to_s3(file_path: str, s3_key: str) -> str:
         print(f"❌ Upload failed: {str(e)}")
         return None
 
-
 @app.post("/generate-ai-clips/")
 def generate_ai_clips(
     filename: str = Body(..., embed=True),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user)  # 🔒 Require auth
 ):
-    print(f"🤖 Generating AI clips for: {filename}")
+    user_id = current_user["user_id"]
+    print(f"🤖 Generating AI clips for: {filename} by user {user_id}")
 
-    # 1️⃣ Fetch video metadata from DB (get actual S3 URL)
-    video_record = db.query(Video).filter(Video.filename == filename).first()
+    # 1️⃣ Fetch video owned by the current user
+    video_record = db.query(Video).filter(
+        Video.filename == filename,
+        Video.user_id == user_id  # ✅ restrict to their own video
+    ).first()
+    
     if not video_record:
-        raise HTTPException(status_code=404, detail=f"Video '{filename}' not found in database.")
+        raise HTTPException(status_code=404, detail=f"Video '{filename}' not found or access denied.")
 
     s3_url = video_record.s3_url
     video_s3_key = s3_url.split(f"https://{AWS_S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/")[-1]
     print(f"🎥 Found S3 key: {video_s3_key}")
 
-    # 2️⃣ Fetch transcript from DB
+    # 2️⃣ Fetch transcript for the video
     record = db.query(Transcription).filter(Transcription.filename == filename).first()
     if not record:
         raise HTTPException(status_code=404, detail="Transcript not found")
 
-    # 3️⃣ Load JSON from transcript field
     try:
         transcript_data = json.loads(record.transcript)
     except json.JSONDecodeError:
@@ -377,13 +490,13 @@ def generate_ai_clips(
     if not segments:
         raise HTTPException(status_code=400, detail="No segments found in transcript.")
 
-    # 4️⃣ Use AI to get top emotional/interesting highlights
+    # 3️⃣ AI Highlight Selection
     try:
         top_highlights = run_pipeline_and_return_highlights(segments, top_n=3)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"LLM analysis failed: {e}")
 
-    # 5️⃣ Generate ECS tasks to create clips
+    # 4️⃣ Generate ECS tasks to create clips
     clips = []
     for i, highlight in enumerate(top_highlights):
         start = highlight["start"]
@@ -394,8 +507,6 @@ def generate_ai_clips(
         clip_url = f"https://{AWS_S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{output_key}"
 
         try:
-            print(f"🚀 Launching ECS task to generate clip {i} (Start: {start}, End: {end})")
-
             ecs_response = launch_ecs_task(
                 mode="generate_clip",
                 bucket=AWS_S3_BUCKET,
@@ -404,54 +515,44 @@ def generate_ai_clips(
                 start=start,
                 end=end
             )
-
             task_arn = ecs_response["tasks"][0]["taskArn"]
-            print(f"✅ ECS task launched for clip {i}: {task_arn}")
 
-            # Save metadata in DB
+            # ✅ Save metadata in DB with user_id
             db_clip = Clip(
                 id=str(uuid4()),
                 filename=filename,
                 start_time=start,
                 end_time=end,
-                clip_url=clip_url
+                clip_url=clip_url,
+                user_id=user_id  # ✅ Secure!
             )
             db.add(db_clip)
             db.commit()
-            print(f"✅ Clip {i} metadata saved in DB")
 
-            # ✅ Generate hashtags for each clip using the transcript segment
+            # ✅ Hashtag generation
             clip_hashtags = []
             segment_text = highlight.get("quote", "")
             if segment_text:
                 try:
-                    # Create a mini transcript-like object the generator can process
                     segment_transcript = json.dumps({"text": segment_text})
                     clip_hashtags = generate_hashtags_from_transcript(segment_transcript, num_hashtags=3)
-                    
-                    # Save hashtags to database
+
                     for tag in clip_hashtags:
-                        # Create hashtag if it doesn't exist
                         db_hashtag = db.query(Hashtag).filter(Hashtag.name == tag).first()
                         if not db_hashtag:
                             db_hashtag = Hashtag(name=tag)
                             db.add(db_hashtag)
                             db.commit()
-                        
-                        # Associate hashtag with the clip
+
                         if db_hashtag not in db_clip.hashtags:
                             db_clip.hashtags.append(db_hashtag)
-                    
-                    # Also associate hashtags with the main video
-                    for tag in clip_hashtags:
-                        db_hashtag = db.query(Hashtag).filter(Hashtag.name == tag).first()
+
                         if db_hashtag not in video_record.hashtags:
                             video_record.hashtags.append(db_hashtag)
-                    
+
                     db.commit()
-                    print(f"✅ Hashtags generated and saved for clip {i}: {clip_hashtags}")
                 except Exception as e:
-                    print(f"❌ ERROR: Failed to generate hashtags for clip {i}: {e}")
+                    print(f"❌ Hashtag generation failed for clip {i}: {e}")
 
             clips.append({
                 "clip_index": i,
@@ -466,27 +567,32 @@ def generate_ai_clips(
         except Exception as e:
             print(f"❌ Failed to launch ECS for clip {i}: {e}")
             continue
-   
+
     print(f"✅ All ECS tasks launched for {filename}")
     return {"filename": filename, "clips": clips}
+
 
 @app.get("/get-clips/")
 def get_clips(
     filename: str = Query(..., description="Filename of the selected video"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user)  # ✅ Require auth
 ):
     """
-    Fetches all clips generated for a specific video.
+    Fetches all clips for a video owned by the current user.
     """
-    print(f"🔍 Fetching clips for: {filename}")
+    user_id = current_user["user_id"]
+    print(f"🔍 Fetching clips for: {filename} by user: {user_id}")
 
-    # Query the database for clips associated with the given filename
-    clips = db.query(Clip).filter(Clip.filename == filename).all()
+    # Only fetch clips that belong to the current user and filename
+    clips = db.query(Clip).filter(
+        Clip.filename == filename,
+        Clip.user_id == user_id
+    ).all()
 
     if not clips:
         raise HTTPException(status_code=404, detail="No clips found for this video.")
 
-    # Format the response
     return {
         "filename": filename,
         "clips": [
