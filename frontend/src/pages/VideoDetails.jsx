@@ -4,6 +4,7 @@ import axios from "axios";
 import { toast } from "react-toastify";
 import HashtagManager from "../components/HashtagManager";
 import ClipCard from "../components/ClipCard";
+import api from "../api";
 
 const VideoDetails = () => {
   const { filename } = useParams();
@@ -35,7 +36,7 @@ const VideoDetails = () => {
   useEffect(() => {
     const fetchClips = async () => {
       try {
-        const response = await axios.get(`http://127.0.0.1:8000/get-clips/`, {
+        const response = await api.get(`http://127.0.0.1:8000/get-clips/`, {
           params: { filename },
         });
         setClips(response.data.clips || []);

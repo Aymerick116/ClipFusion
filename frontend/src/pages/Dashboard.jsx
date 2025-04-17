@@ -41,8 +41,9 @@
 import { useState, useEffect } from "react";
 import Upload from "../components/Upload";
 import VideoList from "../components/VideoList";
-import axios from "axios";
+// import axios from "axios";
 import { FaUpload, FaFolderOpen } from "react-icons/fa";
+import api from "../api";
 
 const Dashboard = () => {
   const [videos, setVideos] = useState([]);
@@ -50,13 +51,30 @@ const Dashboard = () => {
   const [error, setError] = useState(null);
 
   // Function to fetch videos
+  // const fetchVideos = async () => {
+  //   try {
+  //     const response = await axios.get("http://127.0.0.1:8000/videos/");
+  //     console.log("API Response:", response.data); // Debugging
+
+  //     if (Array.isArray(response.data)) {
+  //       setVideos(response.data); // Store full video objects (filename + s3_url)
+  //     } else {
+  //       console.error("Unexpected API response format:", response.data);
+  //     }
+  //   } catch (error) {
+  //     console.error("Error fetching videos:", error);
+  //     setError("Failed to load videos.");
+  //   } finally {
+  //     setLoading(false);
+  //   }
+  // };
   const fetchVideos = async () => {
     try {
-      const response = await axios.get("http://127.0.0.1:8000/videos/");
-      console.log("API Response:", response.data); // Debugging
-
+      const response = await api.get("/videos/");
+      console.log("API Response:", response.data);
+  
       if (Array.isArray(response.data)) {
-        setVideos(response.data); // Store full video objects (filename + s3_url)
+        setVideos(response.data);
       } else {
         console.error("Unexpected API response format:", response.data);
       }
