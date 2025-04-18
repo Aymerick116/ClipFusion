@@ -20,7 +20,7 @@
 
 Check out a quick walkthrough of ClipFusion in action:
 
-🔗 [Watch the Demo](https://your-demo-link.com)  
+🔗 [Watch the Demo](https://www.loom.com/share/4cc4bedcf37a4111b4e0a0a52b54e9bf?sid=503e4572-f12e-43f4-9f51-4422e979b0ec)  
 *(Replace with Loom/YouTube link when ready)*
 
 ---
